@@ -1,0 +1,47 @@
+{
+  "id": "blue_pet",
+  "version": "0.2.0",
+  "canvas": {
+    "width": 1254,
+    "height": 1254
+  },
+  "renderMode": "full_sprite_swap",
+  "anchor": {
+    "x": 0.5,
+    "y": 1
+  },
+  "expressions": {
+    "neutral": "expressions/neutral.png",
+    "happy": "expressions/happy.png",
+    "confused": "expressions/confused.png",
+    "angry": "expressions/angry.png",
+    "sleepy": "expressions/sleepy.png",
+    "surprised": "expressions/surprised.png"
+  },
+  "motions": {
+    "idle": {
+      "type": "tween",
+      "note": "implement in renderer"
+    },
+    "bounce": {
+      "type": "tween",
+      "note": "implement in renderer"
+    }
+  },
+  "assetStatus": {
+    "fullBodyExpressions": "ready_for_review",
+    "mouthLayers": "ready_for_review_neutral_only",
+    "eyeLayers": "pending",
+    "riggedParts": "pending"
+  },
+  "notes": [
+    "Full-body variants are not pixel-identical. Avoid facial compositing or animation crossfade until alignment QA.",
+    "All images contain transparency, but fringes/stray pixels may require cleanup.",
+    "Mouth overlays registered to neutral expression only. Do not overlay on other full-body expressions without aligning faces."
+  ],
+  "mouths": {
+    "closed": "mouths/closed.png",
+    "open_small": "mouths/open_small.png",
+    "open_big": "mouths/open_big.png"
+  }
+}

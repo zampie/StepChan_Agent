@@ -1,0 +1,235 @@
+{
+  "bundleVersion": "1.0",
+  "designVersion": "0.3",
+  "date": "2026-10-13",
+  "status": "documents_and_assets_ready_application_not_implemented",
+  "sources": {
+    "character": {
+      "filename": "StepChan_Character_Bible_v1.md",
+      "sha256": "34e30a935e10b2360f7d57a60bebd8e037bc009f59b2b425aef0409f6ad105d4"
+    },
+    "technicalDesign": {
+      "filename": "Technical_Design_v0_2_original.md",
+      "sha256": "fec91f03be1bcf537bf9aa7717a24e8ff06c3e77e1dd15b45967695b5a05a952"
+    },
+    "assetZip": {
+      "filename": "blue_pet_assets_v0_2.zip",
+      "sha256": "ed68d3e9a376bbd034f43bca4a41f509b39243c8c7cc3187e3d83354c69ab6f9"
+    }
+  },
+  "checks": {
+    "originalFilesPreserved": true,
+    "pngDecode": "PASS",
+    "assetReferencePaths": "PASS",
+    "generatedMarkdownLinks": "PASS",
+    "runtimeTests": "NOT_IMPLEMENTED",
+    "visualQA": "PENDING_COMPOSITING_AND_ALIGNMENT"
+  },
+  "images": [
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/confused.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/happy.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/angry.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/neutral.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/surprised.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/sleepy.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/closed.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/open_big.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/open_small.png",
+      "width": 1254,
+      "height": 1254,
+      "mode": "RGBA",
+      "hasTransparency": true
+    }
+  ],
+  "files": [
+    {
+      "path": ".cursor/rules/stepchan.mdc",
+      "bytes": 400,
+      "sha256": "ef8f794e0edc35714397c9a57af4104fb3011d21b82d9cdeb0abe5d0992aa81f"
+    },
+    {
+      "path": "AGENTS.md",
+      "bytes": 1544,
+      "sha256": "841cd0b7a643e1b030b525dd14313bfd393515c3464367f94a5069e33d0b0e2f"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/angry.png",
+      "bytes": 795715,
+      "sha256": "673090d455e60f6e6792c2287dca931f702ca6a45d456bad10053fb00735339e"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/confused.png",
+      "bytes": 801596,
+      "sha256": "446746017fdd8da3cb764059d91de45760a19ad16b70ba16bf209e42a767fe2e"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/happy.png",
+      "bytes": 804375,
+      "sha256": "3458ec37ccb9255e707c0fdc56987898187c5f8baef79c714f5454c2251af319"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/neutral.png",
+      "bytes": 790814,
+      "sha256": "7827cf0512cff3cf6d3bdcccc71fbda628787e628871c4329270d94098488bd6"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/sleepy.png",
+      "bytes": 790783,
+      "sha256": "1e6de7dd5749e56f1482c91b37b6231bf0bd19e7a66d32efe7b80a8d3a4ad626"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/expressions/surprised.png",
+      "bytes": 801286,
+      "sha256": "ff5abff200cbf7737ba26dac627eb482b5a6afbaa11073244ecf4dadbc0bd64f"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/manifest.json",
+      "bytes": 1305,
+      "sha256": "3d4aa31833c3eb85d8fb1ce0ca82d96a940c0246721c2e4de10719f51cdf7a1f"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/closed.png",
+      "bytes": 24129,
+      "sha256": "b2427d358252ffd6cf2104f6a07dcb82fa8e0075ca92191858896465ccce4563"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/open_big.png",
+      "bytes": 23237,
+      "sha256": "bec6c46f4c50f7c5c9ce01a4068d8edb3d902129cb505c1f7c55579da4b70162"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/mouths/open_small.png",
+      "bytes": 23725,
+      "sha256": "82e5e43c79b1ce97ae9be81a2f5ce7d2e42222369225954085e7f23e06b94eff"
+    },
+    {
+      "path": "assets/blue_pet_assets_v0_2/README.md",
+      "bytes": 686,
+      "sha256": "52129ce7e18aea85d23034694b9510e371eb4d86c69533ef9a28bcf8178c4f1a"
+    },
+    {
+      "path": "config/server.env.example",
+      "bytes": 345,
+      "sha256": "3d972feb6bf05b7b6928083a52d9e54783c2f68bd5b54501e955a68dd025e630"
+    },
+    {
+      "path": "contracts/mock-chat.events.json",
+      "bytes": 676,
+      "sha256": "409c8018c16ba399aabb8a680ba719d159b748c6675a4437098c7dab38ffd45f"
+    },
+    {
+      "path": "contracts/mock-tool.events.json",
+      "bytes": 870,
+      "sha256": "6121870e1c578ccd94b5922829a37c8468767fbcc8acb2692b9cdd25cce67489"
+    },
+    {
+      "path": "contracts/presentation-capabilities.json",
+      "bytes": 892,
+      "sha256": "e57e8887fc5c685688f365a324dc71c7b01c283aa46cc560cef4361f2123b9b7"
+    },
+    {
+      "path": "contracts/README.md",
+      "bytes": 812,
+      "sha256": "8492c1190ba30a50f6400a48f96ee4ee722c5c665a27f2be9468382e9517a7d9"
+    },
+    {
+      "path": "docs/ASSET_INTEGRATION.md",
+      "bytes": 2858,
+      "sha256": "d95d1f8f052ae3305d655f41e494c4d1084334d8b4f6ba9e5d16e0155202f2d9"
+    },
+    {
+      "path": "docs/IMPLEMENTATION_AND_ACCEPTANCE.md",
+      "bytes": 4095,
+      "sha256": "e0e770a8f7a5cb9d357bfe06ac06d1938ea963c9db6fcfedf2eebc8eef7d04bc"
+    },
+    {
+      "path": "docs/REVISION_NOTES.md",
+      "bytes": 1931,
+      "sha256": "584b2aeda66a7cf3ee92d918e62a2fe7c016ce945d6777b73af1859283edf1ef"
+    },
+    {
+      "path": "docs/StepChan_Character_Bible_v1.md",
+      "bytes": 14721,
+      "sha256": "34e30a935e10b2360f7d57a60bebd8e037bc009f59b2b425aef0409f6ad105d4"
+    },
+    {
+      "path": "docs/StepChan_Technical_Design_v0_3.md",
+      "bytes": 17015,
+      "sha256": "c5e8a4f3fee7988c4c94f62e6e0ef059726f78a29217760745b3ae23263f7bf7"
+    },
+    {
+      "path": "prompts/stepchan.runtime.md",
+      "bytes": 2007,
+      "sha256": "7a34bf78d2fc4d00982d8637f9e0cd3d24e105c953c3620c37786d0676094bf2"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2514,
+      "sha256": "2eb287f91acb340d3b4dcc1ff66b607b833787aba4bf9a5c1e1c7970a42ffc3e"
+    },
+    {
+      "path": "scripts/verify_bundle.py",
+      "bytes": 1410,
+      "sha256": "6d89ea65fa8f65306bc11f2eb94d35c674fcd6f7c3eb2e64155cae5c45563be7"
+    },
+    {
+      "path": "sources/Technical_Design_v0_2_original.md",
+      "bytes": 18417,
+      "sha256": "fec91f03be1bcf537bf9aa7717a24e8ff06c3e77e1dd15b45967695b5a05a952"
+    },
+    {
+      "path": "START_HERE.md",
+      "bytes": 1653,
+      "sha256": "5daf2d46275a956f85ac81cef95c2a154bc2370cbbb278d99d610b124c780ab5"
+    }
+  ]
+}

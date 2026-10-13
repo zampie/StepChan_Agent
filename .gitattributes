@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# Preserve original artwork, manifests, character bible and source design byte-for-byte.
+assets/** -text
+docs/StepChan_Character_Bible_v1.md -text
+sources/** -text
