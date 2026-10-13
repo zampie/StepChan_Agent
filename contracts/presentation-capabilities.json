@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "status": "implemented_web_mvp_2026_10_13",
+  "assetId": "blue_pet",
+  "assetVersion": "0.2.0",
+  "expressions": [
+    "neutral",
+    "happy",
+    "confused",
+    "angry",
+    "sleepy",
+    "surprised"
+  ],
+  "renderMode": "full_sprite_swap",
+  "motions": [
+    "idle",
+    "think",
+    "bounce",
+    "talk"
+  ],
+  "missingAssetCapabilities": [
+    "blink",
+    "wave",
+    "independent_head",
+    "independent_ahoge"
+  ],
+  "mouthOverlay": {
+    "enabledByDefault": true,
+    "requiresVisualQA": false,
+    "visualQA": "512px derived assets reviewed at 250/350/500 CSS px on light/dark/checker backgrounds; docs/VALIDATION.md",
+    "allowedExpression": "neutral",
+    "frames": [
+      "closed",
+      "open_small",
+      "open_big"
+    ],
+    "fallback": "hide_overlay_keep_expression"
+  },
+  "defaultExpression": "neutral",
+  "defaultMotion": "idle",
+  "companionChatterEnabledByDefault": false,
+  "persistentConversationMemory": false
+}

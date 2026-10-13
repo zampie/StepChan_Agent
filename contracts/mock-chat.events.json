@@ -1,0 +1,38 @@
+[
+  {
+    "event": "status",
+    "data": {
+      "requestId": "demo-001",
+      "activity": "thinking"
+    }
+  },
+  {
+    "event": "text_delta",
+    "data": {
+      "requestId": "demo-001",
+      "delta": "你好呀！我是Step酱。"
+    }
+  },
+  {
+    "event": "text_delta",
+    "data": {
+      "requestId": "demo-001",
+      "delta": "今天要从哪一步开始呢？"
+    }
+  },
+  {
+    "event": "presentation",
+    "data": {
+      "requestId": "demo-001",
+      "expression": "happy",
+      "motion": "bounce"
+    }
+  },
+  {
+    "event": "done",
+    "data": {
+      "requestId": "demo-001",
+      "status": "completed"
+    }
+  }
+]

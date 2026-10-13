@@ -1,0 +1,11 @@
+---
+description: StepChan Web MVP scope, character and asset constraints
+alwaysApply: true
+---
+
+# 项目共同约定
+
+本规则适用于整个项目。阅读并遵循根目录 `AGENTS.md`。
+开发以 `docs/StepChan_Technical_Design_v0_3.md` 为准。
+角色内容以 `docs/StepChan_Character_Bible_v1.md` 为准。
+素材接入以 `docs/ASSET_INTEGRATION.md` 和实际 manifest 为准。

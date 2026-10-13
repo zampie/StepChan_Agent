@@ -1,0 +1,45 @@
+[
+  {
+    "event": "status",
+    "data": {
+      "requestId": "demo-002",
+      "activity": "thinking"
+    }
+  },
+  {
+    "event": "tool_start",
+    "data": {
+      "requestId": "demo-002",
+      "toolCallId": "tool-001",
+      "name": "open_url"
+    }
+  },
+  {
+    "event": "tool_end",
+    "data": {
+      "requestId": "demo-002",
+      "toolCallId": "tool-001",
+      "name": "open_url",
+      "ok": true,
+      "result": {
+        "kind": "url_proposal",
+        "url": "https://example.com/",
+        "requiresUserClick": true
+      }
+    }
+  },
+  {
+    "event": "text_delta",
+    "data": {
+      "requestId": "demo-002",
+      "delta": "链接准备好了，点击“打开网页”即可访问。"
+    }
+  },
+  {
+    "event": "done",
+    "data": {
+      "requestId": "demo-002",
+      "status": "completed"
+    }
+  }
+]
