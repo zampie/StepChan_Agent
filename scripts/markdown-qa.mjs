@@ -7,7 +7,7 @@ try {
   page.on('request', (r) => {
     if (!r.url().startsWith('http://127.0.0.1:5173')) external.push(r.url());
   });
-  await page.route('**/api/chat', async (route) => {
+  await page.route('**/api/interact', async (route) => {
     const { requestId } = route.request().postDataJSON();
     const events = [
       {

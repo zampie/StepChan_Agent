@@ -1,3 +1,4 @@
+import { getProviderConfig } from './providerConfig';
 import Fastify from 'fastify';
 import staticPlugin from '@fastify/static';
 import { existsSync } from 'node:fs';
@@ -5,9 +6,11 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import dotenv from 'dotenv';
 import { requestSchema, type ChatEvent } from '../../../shared/protocol';
-import { mockProvider, openRouterProvider } from './providers';
+import { mockProvider, chatProvider } from './providers';
 import { runAgent } from './runtime';
 import { validTimezone } from './tools';
+import { registerInteractionRoutes } from './interactionRoutes';
+import { audioConfig, registerAudioRoutes } from './audioRoutes';
 const root = resolve(import.meta.dirname, '../../..');
 dotenv.config({ path: resolve(root, '.env'), quiet: true });
 export function buildServer() {
@@ -23,9 +26,13 @@ export function buildServer() {
   });
   app.get('/api/health', async () => ({
     ok: true,
-    liveConfigured: !!process.env.OPENROUTER_API_KEY,
-    model: process.env.OPENROUTER_MODEL ?? 'stepfun/step-5-preview',
+    liveConfigured: !!getProviderConfig().key,
+    model: getProviderConfig().model,
+    provider: getProviderConfig().provider,
+    audio: audioConfig(),
   }));
+  registerInteractionRoutes(app);
+  registerAudioRoutes(app);
   app.post('/api/chat', async (req, reply) => {
     const parsed = requestSchema.safeParse(req.body);
     if (!parsed.success)
@@ -33,7 +40,7 @@ export function buildServer() {
     const request = parsed.data;
     if (request.timezone && !validTimezone(request.timezone))
       return reply.code(400).send({ message: '浏览器时区无效。' });
-    if (request.mode === 'live' && !process.env.OPENROUTER_API_KEY)
+    if (request.mode === 'live' && !getProviderConfig().key)
       return reply
         .code(503)
         .send({ message: '尚未配置服务端 API 密钥。请使用演示模式，或配置根目录 .env。' });
@@ -65,13 +72,7 @@ export function buildServer() {
     }, 10000);
     try {
       const provider =
-        request.mode === 'mock'
-          ? mockProvider(request)
-          : openRouterProvider({
-              key: process.env.OPENROUTER_API_KEY!,
-              model: process.env.OPENROUTER_MODEL ?? 'stepfun/step-5-preview',
-              maxTokens: Math.min(4096, Math.max(128, Number(process.env.MAX_TOKENS) || 1024)),
-            });
+        request.mode === 'mock' ? mockProvider(request) : chatProvider(getProviderConfig());
       await runAgent(request, provider, controller.signal, emit);
       emit({ type: 'done', requestId: request.requestId, status: 'completed' });
     } catch (error) {

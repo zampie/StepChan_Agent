@@ -1,7 +1,20 @@
-import { eventSchema, type ChatEvent, type ChatRequest } from '../../../../shared/protocol';
+import {
+  eventSchema,
+  type ChatEvent,
+  type ChatRequest,
+  type InteractionRequest,
+} from '../../../../shared/protocol';
 import { readSSE } from '../../../../shared/sse';
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 export async function streamChat(
-  request: ChatRequest,
+  request: ChatRequest | InteractionRequest,
   signal: AbortSignal,
   onEvent: (event: ChatEvent) => void,
 ) {
@@ -17,7 +30,7 @@ export async function streamChat(
   let done = false,
     first = true;
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch('sessionId' in request ? '/api/interact' : '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
@@ -25,7 +38,7 @@ export async function streamChat(
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({ message: '连接服务失败。' }));
-      throw Error(data.message ?? '请求失败。');
+      throw new ApiError(response.status, data.message ?? '请求失败。');
     }
     if (!response.body) throw Error('没有收到回复流。');
     for await (const frame of readSSE(response.body)) {

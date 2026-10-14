@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { interactionInputSchema, sceneSchema, suggestionSchema } from './room';
 export const expressions = [
   'neutral',
   'happy',
@@ -35,6 +36,21 @@ export const requestSchema = z
       c.addIssue({ code: 'custom', message: '最后一条必须是用户消息。' });
   });
 export type ChatRequest = z.infer<typeof requestSchema>;
+export const interactionSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    mode: z.enum(['mock', 'live']),
+    input: interactionInputSchema,
+    timezone: z.string().max(100).optional(),
+    scenario: z.enum(['normal', 'error', 'disconnect', 'slow']).optional(),
+    interrupt: z
+      .object({ requestId: z.string().uuid(), visibleChars: z.number().int().min(0).max(50000) })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type InteractionRequest = z.infer<typeof interactionSchema>;
 export function safeUrl(value: string): string | null {
   try {
     const url = new URL(value);
@@ -52,11 +68,15 @@ export const toolResultSchema = z
     url: z.string().optional(),
     timezone: z.string().optional(),
     iso: z.string().optional(),
+    revision: z.number().int().optional(),
   })
   .strict();
 export type ToolResult = z.infer<typeof toolResultSchema>;
 const base = { requestId: z.string().uuid() };
 export const eventSchema = z.discriminatedUnion('type', [
+  z.object({ ...base, type: z.literal('scene'), scene: sceneSchema }),
+  z.object({ ...base, type: z.literal('suggestions'), items: z.array(suggestionSchema).max(6) }),
+  z.object({ ...base, type: z.literal('goal'), text: z.string().max(200) }),
   z.object({ ...base, type: z.literal('status'), activity: z.enum(['thinking', 'speaking']) }),
   z.object({ ...base, type: z.literal('text_delta'), delta: z.string() }),
   z.object({ ...base, type: z.literal('presentation'), ...presentationSchema.shape }).strict(),

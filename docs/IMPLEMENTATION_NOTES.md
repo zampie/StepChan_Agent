@@ -1,5 +1,7 @@
 # Web MVP 实现决策
 
+> 此文件保留初版 M1–M5 交付时的记录。后续新增的小房间、自主探索、服务端会话和打断机制，以 [交互增强记录](INTERACTION_V2.md) 与 README 为准。
+
 2026-10-13。用户授权技术设计可调整，以下记录相对 V0.3 的实际变化。
 
 - 保留 React、TypeScript、Vite、PixiJS 8、Fastify，以及两个 npm workspace；不发布网站，不引入桌面壳。

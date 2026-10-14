@@ -12,6 +12,8 @@ export class PetController {
   requestId: string | null = null;
   started = 0;
   lastText = 0;
+  audioLevel: number | null = null;
+  audioDriven = false;
   reduced = false;
   mouthEnabled = capabilities.mouthOverlay.enabledByDefault;
   previewMouth: 'closed' | 'open_small' | 'open_big' | null = null;
@@ -78,6 +80,7 @@ export class PetController {
       }
     }
     const activeMouth =
+      !this.audioDriven &&
       !still &&
       this.expression === 'neutral' &&
       this.mouthEnabled &&
@@ -86,6 +89,13 @@ export class PetController {
     const mouth =
       this.expression === 'neutral' && !still
         ? (this.previewMouth ??
+          (this.audioLevel !== null && this.mouthEnabled
+            ? this.audioLevel > 0.065
+              ? 'open_big'
+              : this.audioLevel > 0.012
+                ? 'open_small'
+                : 'closed'
+            : null) ??
           (activeMouth
             ? (['closed', 'open_small', 'open_big', 'open_small'] as const)[
                 Math.floor(now / 180) % 4

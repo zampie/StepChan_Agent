@@ -20,22 +20,30 @@ import {
 } from 'lucide-react';
 import { PetController } from './pet/PetController';
 import { PetRenderer } from './pet/PetRenderer';
-import { streamChat } from './agent/AgentClient';
+import { useInteraction } from './agent/useInteraction';
+import { VoiceControls } from './audio/VoiceControls';
+import { RoomObjects } from './room/RoomObjects';
+import { SuggestionBar } from './room/SuggestionBar';
+import { suggestionsFor, touchLabels, type InteractionInput } from '../../../shared/room';
 import {
   expressions,
   motions,
-  requestSchema,
   safeUrl,
   type Activity,
   type ChatRequest,
-  type Message,
-  type ToolResult,
 } from '../../../shared/protocol';
-type ToolCard = { id: string; name: string; result?: ToolResult };
-type Entry = Message & {
-  id: string;
-  state?: 'streaming' | 'completed' | 'failed' | 'cancelled';
-  tools?: ToolCard[];
+const toolTitles: Record<string, string> = {
+  get_time: '查询时间',
+  open_url: '网页链接',
+  observe_scene: '观察房间',
+  set_light: '调整台灯',
+  water_plant: '给盆栽浇水',
+  draw_discovery_card: '抽取发现卡',
+  reveal_card: '揭晓答案',
+  answer_card: '检查答案',
+  start_timer: '启动倒计时',
+  cancel_timer: '取消倒计时',
+  move_to: '移动到物件旁',
 };
 const expressionLabels = ['平静', '开心', '困惑', '生气', '困倦', '惊讶'];
 const activityLabels: Record<Activity, string> = {
@@ -49,67 +57,102 @@ export function App() {
   const host = useRef<HTMLDivElement>(null),
     renderer = useRef<PetRenderer | null>(null),
     controller = useRef(new PetController());
-  const active = useRef<{ id: string; abort: AbortController } | null>(null),
-    scroll = useRef<HTMLDivElement>(null);
-  const [entries, setEntries] = useState<Entry[]>([]),
-    [input, setInput] = useState(''),
-    [error, setError] = useState(''),
+  const conversation = useInteraction(controller.current);
+  const {
+    voice,
+    entries,
+    scene,
+    suggestions,
+    setSuggestions,
+    error,
+    notice,
+    busy,
+    activity,
+    setActivity,
+    goal,
+    ready,
+    mode,
+    model,
+    setMode,
+    live,
+    auto,
+    setAuto,
+    autoCount,
+    setAutoCount,
+    lastActivity,
+    interact,
+    cancel,
+    cancelAutonomy,
+    clear,
+    retry,
+    canRetry,
+  } = conversation;
+  const scroll = useRef<HTMLDivElement>(null);
+  const [input, setInput] = useState(''),
     [assetError, setAssetError] = useState('');
-  const [busy, setBusy] = useState(false),
-    [activity, setActivity] = useState<Activity>('idle'),
-    [mode, setMode] = useState<'mock' | 'live'>('mock');
-  const [live, setLive] = useState(false),
-    [settings, setSettings] = useState(false),
+  const [settings, setSettings] = useState(false),
     [collapsed, setCollapsed] = useState(false),
     [reduced, setReduced] = useState(false),
     [mouths, setMouths] = useState(true);
-  const [greeting, setGreeting] = useState('今天想从哪一步开始？'),
+  const [greeting, setGreeting] = useState('今天，一起发现点什么？'),
     [background, setBackground] = useState('light'),
-    [size, setSize] = useState(430),
+    [size, setSize] = useState(370),
     [anchor, setAnchor] = useState(false),
-    [poseVersion, setPoseVersion] = useState(0);
-  const lastRequest = useRef<Message[] | null>(null),
-    greetingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    [poseVersion, setPoseVersion] = useState(0),
+    [suggestionPage, setSuggestionPage] = useState(0);
+  const touchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceBusy = voice.mic !== 'idle' || voice.status !== 'idle';
+  const latest = useRef({ input, busy, scene, interact, autoCount, voiceBusy });
+  latest.current = { input, busy, scene, interact, autoCount, voiceBusy };
+  useEffect(() => {
+    if (voice.transcript) {
+      setInput(voice.transcript);
+      voice.setTranscript('');
+      setCollapsed(false);
+      lastActivity.current = Date.now();
+    }
+  }, [voice.transcript]);
+  useEffect(() => {
+    voice.stop();
+  }, [mode]);
   const setState = (a: Activity) => {
     controller.current.setActivity(a);
     setActivity(a);
   };
+  const handleInput = (event: InteractionInput) => {
+    setCollapsed(false);
+    void interact(event);
+  };
   useEffect(() => {
     let alive = true;
-    const r = new PetRenderer(
+    const rendererInstance = new PetRenderer(
       host.current!,
       controller.current,
       (s) => {
         if (alive) setAssetError(s);
       },
-      () => {
-        setGreeting('嘿，我在！一起发现点新东西？');
-        if (greetingTimer.current) clearTimeout(greetingTimer.current);
-        greetingTimer.current = setTimeout(() => setGreeting('今天想从哪一步开始？'), 3500);
+      (part) => {
+        setGreeting(touchLabels[part] + '，收到你的招呼啦');
+        if (touchTimer.current) clearTimeout(touchTimer.current);
+        touchTimer.current = setTimeout(() => {
+          void latest.current.interact({ kind: 'touch', part });
+        }, 220);
       },
     );
-    renderer.current = r;
-    void r.init();
-    fetch('/api/health')
-      .then((r) => r.json())
-      .then((data) => {
-        if (alive) {
-          setLive(data.liveConfigured);
-          if (data.liveConfigured) setMode('live');
-        }
-      })
-      .catch(() => {});
+    renderer.current = rendererInstance;
+    void rendererInstance.init();
     return () => {
       alive = false;
-      r.destroy();
-      active.current?.abort.abort();
-      active.current = null;
-      if (greetingTimer.current) clearTimeout(greetingTimer.current);
+      rendererInstance.destroy();
+      if (touchTimer.current) clearTimeout(touchTimer.current);
     };
   }, []);
   useEffect(() => {
     renderer.current?.setSize(size);
   }, [size]);
+  useEffect(() => {
+    renderer.current?.setTarget(scene.petTarget);
+  }, [scene.petTarget, scene.petMoveRevision]);
   useEffect(() => {
     const media = matchMedia('(prefers-reduced-motion: reduce)');
     const update = () => {
@@ -120,122 +163,50 @@ export function App() {
     return () => media.removeEventListener('change', update);
   }, [reduced]);
   useEffect(() => {
+    controller.current.mouthEnabled = mouths;
+  }, [mouths]);
+  useEffect(() => {
     scroll.current?.scrollTo({ top: scroll.current.scrollHeight });
   }, [entries, busy, error]);
   useEffect(() => {
-    controller.current.mouthEnabled = mouths;
-  }, [mouths]);
-  const finish = (id: string, state: 'completed' | 'failed' | 'cancelled') => {
-    if (active.current?.id !== id) return;
-    controller.current.finish(id, state === 'completed');
-    active.current = null;
-    setBusy(false);
-    setActivity('idle');
-    setEntries((old) => old.map((e) => (e.id === id ? { ...e, state } : e)));
+    if (!ready) return;
+    const interval = setInterval(() => {
+      const current = latest.current;
+      if (document.hidden || current.busy || current.voiceBusy || current.input.trim()) return;
+      if (current.scene.timer.status === 'running' && current.scene.timer.endsAt <= Date.now()) {
+        void current.interact({ kind: 'timer_finished', timerId: current.scene.timer.id });
+        return;
+      }
+      if (!auto || Date.now() - lastActivity.current < 22000) return;
+      if (current.autoCount >= 6) {
+        setAuto(false);
+        return;
+      }
+      lastActivity.current = Date.now();
+      setAutoCount((n) => n + 1);
+      void current.interact({ kind: 'autonomy' });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [auto, ready]);
+  const toggleAuto = () => {
+    if (auto) {
+      setAuto(false);
+      cancelAutonomy();
+    } else {
+      setAuto(true);
+      setAutoCount(0);
+      lastActivity.current = Date.now() - 19000;
+    }
   };
-  const cancel = () => {
-    const current = active.current;
-    if (!current) return;
-    current.abort.abort();
-    finish(current.id, 'cancelled');
-  };
-  const clear = () => {
-    cancel();
-    setEntries([]);
-    setError('');
-    lastRequest.current = null;
-    controller.current.present({ expression: 'neutral', motion: 'idle' });
-  };
-  async function send(text = input, scenario: ChatRequest['scenario'] = 'normal', retry = false) {
-    if (active.current || (!text.trim() && !retry)) return;
-    let history: Message[];
-    if (retry && lastRequest.current) history = lastRequest.current;
-    else
-      history = [
-        ...entries
-          .filter((e) => e.role === 'user' || e.state === 'completed')
-          .filter((e) => e.content)
-          .map(({ role, content }) => ({ role, content })),
-        { role: 'user' as const, content: text.trim() },
-      ];
-    const id = crypto.randomUUID();
-    const request = {
-      requestId: id,
-      mode,
-      messages: history,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      scenario,
-    };
-    const validation = requestSchema.safeParse(request);
-    if (!validation.success) {
-      setError('单条最多 4000 字，会话最多 20 条、16000 字。请缩短输入或清空会话后重试。');
+  async function send(text = input, scenario: ChatRequest['scenario'] = 'normal', isRetry = false) {
+    if (isRetry) {
+      retry();
       return;
     }
-    const abort = new AbortController();
-    active.current = { id, abort };
-    lastRequest.current = history;
-    setError('');
+    if (!text.trim()) return;
     setInput('');
-    setBusy(true);
-    setActivity('thinking');
-    controller.current.begin(id);
     setCollapsed(false);
-    setEntries((old) => [
-      ...old,
-      ...(retry ? [] : [{ id: crypto.randomUUID(), role: 'user' as const, content: text.trim() }]),
-      { id, role: 'assistant', content: '', state: 'streaming', tools: [] },
-    ]);
-    try {
-      await streamChat(validation.data, abort.signal, (event) => {
-        if (active.current?.id !== id) return;
-        if (event.type === 'text_delta') {
-          controller.current.text(id);
-          setActivity('speaking');
-          setEntries((old) =>
-            old.map((e) => (e.id === id ? { ...e, content: e.content + event.delta } : e)),
-          );
-        } else if (event.type === 'presentation') {
-          controller.current.present({ expression: event.expression, motion: event.motion }, id);
-        } else if (event.type === 'tool_start') {
-          setEntries((old) =>
-            old.map((e) =>
-              e.id === id
-                ? { ...e, tools: [...(e.tools ?? []), { id: event.toolCallId, name: event.name }] }
-                : e,
-            ),
-          );
-        } else if (event.type === 'tool_end') {
-          setEntries((old) =>
-            old.map((e) =>
-              e.id === id
-                ? {
-                    ...e,
-                    tools: e.tools?.map((t) =>
-                      t.id === event.toolCallId ? { ...t, result: event.result } : t,
-                    ),
-                  }
-                : e,
-            ),
-          );
-        } else if (event.type === 'error') setError(event.message);
-        else if (event.type === 'done')
-          finish(
-            id,
-            event.status === 'completed'
-              ? 'completed'
-              : event.status === 'cancelled'
-                ? 'cancelled'
-                : 'failed',
-          );
-      });
-    } catch (e) {
-      if (active.current?.id !== id) return;
-      if (abort.signal.aborted) finish(id, 'cancelled');
-      else {
-        setError(e instanceof Error ? e.message : '请求未完成，请重试。');
-        finish(id, 'failed');
-      }
-    }
+    await interact({ kind: 'text', text }, scenario);
   }
   const debugUpdate = (fn: () => void) => {
     fn();
@@ -290,15 +261,25 @@ export function App() {
             <input type="checkbox" checked={mouths} onChange={(e) => setMouths(e.target.checked)} />
             说话嘴型（仅平静表情）
           </label>
-          <p>主动闲聊已关闭。不会读取其他窗口，也不会保存聊天或人物偏好。</p>
+          <p>
+            自主探索由你开启，每次最多探索 6
+            步。聊天与房间状态仅保留在本次会话内存，不读取其他窗口。
+          </p>
         </section>
       )}
       <main className={`workspace ${collapsed ? 'chat-collapsed' : ''}`}>
-        <section className={`stage ${background}`} aria-label="角色舞台">
+        <section
+          className={`stage room-stage ${background} ${scene.light.on ? 'lamp-on' : 'lamp-off'}`}
+          aria-label="角色舞台"
+        >
           <div className="stage-heading">
             <span className="presence">
               <i />
-              {activityLabels[activity]}
+              {voice.mic === 'recording'
+                ? '我在听'
+                : voice.status === 'playing'
+                  ? '正在说话'
+                  : activityLabels[activity]}
             </span>
             <button
               className="icon-button"
@@ -309,13 +290,21 @@ export function App() {
               <RotateCcw size={17} />
             </button>
           </div>
+          <RoomObjects scene={scene} interact={handleInput} ready={ready} />
           <div className="stage-orbit orbit-one" />
           <div className="stage-orbit orbit-two" />
           <Star className="stage-star star-one" size={23} />
           <span className="little-dot" />
           <Sparkles className="stage-star star-two" size={18} />
+          <div className="autonomy-controls">
+            <button role="switch" aria-checked={auto} onClick={toggleAuto} disabled={!ready}>
+              <span className={`autonomy-switch ${auto ? 'enabled' : ''}`} />
+              自主探索
+            </button>
+            <small>{auto ? `正在探索 · ${autoCount}/6 步` : '让她自己找点事做'}</small>
+          </div>
           <div className="hello">
-            <span>你好呀，我是 Step酱</span>
+            <span>Step酱的小小探索室</span>
             <h1>{greeting}</h1>
           </div>
           <div className="pet-area" ref={host} aria-label="Step酱，可在舞台内拖动" role="img" />
@@ -328,9 +317,9 @@ export function App() {
           <div className="pet-shadow" />
           <div className="stage-footer">
             <span>
-              <span className="tiny-star">✦</span> 一起往前迈一步吧
+              <span className="tiny-star">✦</span> {goal}
             </span>
-            <small>拖动我，换个位置</small>
+            <small>点点头顶、脸颊、徽章或手</small>
           </div>
           {collapsed && (
             <button className="reopen" onClick={() => setCollapsed(false)}>
@@ -343,14 +332,20 @@ export function App() {
           <header className="chat-header">
             <div>
               <MessageCircle size={19} />
-              <h2>和 Step酱聊聊</h2>
+              <h2>一起发现点什么</h2>
             </div>
             <div>
               <button
                 className="icon-button"
                 title="清空会话"
                 aria-label="清空会话"
-                onClick={clear}
+                onClick={() => {
+                  if (touchTimer.current) clearTimeout(touchTimer.current);
+                  setInput('');
+                  setGreeting('今天，一起发现点什么？');
+                  renderer.current?.resetPosition();
+                  clear();
+                }}
               >
                 <Trash2 size={17} />
               </button>
@@ -372,14 +367,15 @@ export function App() {
                 disabled={busy}
                 onChange={(e) => {
                   setMode(e.target.value as 'mock' | 'live');
-                  setError('');
                 }}
               >
                 <option value="mock">演示模式</option>
                 <option value="live">真实模型{live ? '' : ' · 未配置'}</option>
               </select>
             </label>
-            <small>{mode === 'mock' ? '预设回复 · 不消耗额度' : 'Step 5 · 在线对话'}</small>
+            <small>
+              {mode === 'mock' ? '预设回复 · 不消耗额度' : `${model || '模型'} · 在线对话`}
+            </small>
           </div>
           <div
             className="conversation"
@@ -427,7 +423,17 @@ export function App() {
             )}
             {entries.map((entry) => (
               <div className={`message ${entry.role}`} key={entry.id}>
-                <span className="speaker">{entry.role === 'user' ? '你' : 'Step酱'}</span>
+                <span className="speaker">
+                  {entry.role === 'user'
+                    ? entry.source === 'autonomy'
+                      ? '自主探索'
+                      : entry.source === 'timer_finished'
+                        ? '房间事件'
+                        : entry.source === 'touch' || entry.source === 'action'
+                          ? '你的互动'
+                          : '你'
+                    : 'Step酱'}
+                </span>
                 {entry.content && (
                   <div className="message-text">
                     <Markdown
@@ -452,17 +458,13 @@ export function App() {
                   <div className="tool-card" key={tool.id}>
                     <div>
                       {tool.name === 'get_time' ? <Clock size={16} /> : <ExternalLink size={16} />}
-                      <strong>
-                        {tool.name === 'get_time'
-                          ? '查询时间'
-                          : tool.name === 'open_url'
-                            ? '网页链接'
-                            : '工具请求'}
-                      </strong>
+                      <strong>{toolTitles[tool.name] ?? '工具请求'}</strong>
                       {tool.result?.ok && <Check size={15} />}
                     </div>
                     <p>
-                      {tool.result?.message ??
+                      {(tool.name === 'observe_scene' && tool.result?.ok
+                        ? '已检查灯光、盆栽、发现卡和计时器。'
+                        : tool.result?.message) ??
                         (entry.state === 'streaming' ? '正在处理…' : '处理已中断')}
                     </p>
                     {tool.result?.url && safeUrl(tool.result.url) && (
@@ -497,7 +499,7 @@ export function App() {
           {error && (
             <div className="error-banner" role="alert">
               <p>{error}</p>
-              {lastRequest.current && (
+              {canRetry && (
                 <button disabled={busy} onClick={() => void send('', 'normal', true)}>
                   <RotateCcw size={14} />
                   重试
@@ -505,6 +507,22 @@ export function App() {
               )}
             </div>
           )}
+          {notice && (
+            <p className="session-notice" role="status">
+              {notice}
+            </p>
+          )}
+          <SuggestionBar
+            items={suggestions}
+            busy={busy}
+            ready={ready}
+            onSelect={handleInput}
+            onStop={cancel}
+            onRotate={() => {
+              setSuggestionPage((n) => n + 1);
+              setSuggestions(suggestionsFor(scene, suggestionPage + 1));
+            }}
+          />
           <form
             className="composer"
             onSubmit={(e) => {
@@ -512,6 +530,16 @@ export function App() {
               void send();
             }}
           >
+            <VoiceControls
+              voice={voice}
+              live={mode === 'live'}
+              ready={ready}
+              onStart={() => {
+                cancel();
+                lastActivity.current = Date.now();
+              }}
+              onStop={cancel}
+            />
             <div className="input-wrap">
               <textarea
                 aria-label="给 Step酱发消息"
@@ -519,6 +547,7 @@ export function App() {
                 value={input}
                 maxLength={4000}
                 onChange={(e) => {
+                  voice.cancelRecording();
                   setInput(e.target.value);
                   if (!busy) setState(e.target.value ? 'listening' : 'idle');
                 }}
@@ -528,29 +557,28 @@ export function App() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault();
-                    if (!busy) void send();
+                    void send();
                   }
                 }}
               />
-              {busy ? (
+              {(busy || voice.status !== 'idle') && (
                 <button
                   type="button"
-                  className="send-button stop"
+                  className="interrupt-stop"
                   aria-label="停止回复"
                   onClick={cancel}
                 >
-                  <Square size={17} />
-                </button>
-              ) : (
-                <button
-                  type="submit"
-                  className="send-button"
-                  aria-label="发送消息"
-                  disabled={!input.trim()}
-                >
-                  <ArrowUp size={21} />
+                  <Square size={15} />
                 </button>
               )}
+              <button
+                type="submit"
+                className="send-button"
+                aria-label={busy ? '打断并发送' : '发送消息'}
+                disabled={!input.trim() || !ready}
+              >
+                <ArrowUp size={21} />
+              </button>
             </div>
             <div className="composer-foot">
               <span>Enter 发送 · Shift + Enter 换行</span>
@@ -649,7 +677,7 @@ export function App() {
                   value={size}
                   onChange={(e) => setSize(Number(e.target.value))}
                 >
-                  {[250, 350, 430, 500].map((n) => (
+                  {[250, 350, 370, 430, 500].map((n) => (
                     <option key={n} value={n}>
                       {n}px
                     </option>

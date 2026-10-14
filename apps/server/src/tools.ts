@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { safeUrl, type ToolResult } from '../../../shared/protocol';
+import { createScene, type Scene } from '../../../shared/room';
+import { applyRoomTool, roomToolDefinitions } from './roomTools';
 export const toolDefinitions = [
+  ...roomToolDefinitions,
   {
     type: 'function',
     function: {
@@ -38,13 +41,18 @@ export function validTimezone(value: string) {
 export class ToolRunner {
   private results = new Map<string, ToolResult>();
   private count = 0;
-  constructor(private timezone = 'UTC') {}
+  constructor(
+    private timezone = 'UTC',
+    private scene: Scene = createScene(),
+  ) {}
   run(id: string, name: string, args: unknown): ToolResult {
     const cached = this.results.get(id);
     if (cached) return cached;
     if (++this.count > 4) return { ok: false, message: '本轮工具调用已达 4 次上限。' };
     let result: ToolResult;
-    if (name === 'get_time') {
+    const roomResult = applyRoomTool(this.scene, name, args);
+    if (roomResult) result = roomResult;
+    else if (name === 'get_time') {
       const parsed = z
         .object({ timezone: z.string().max(100).optional() })
         .strict()

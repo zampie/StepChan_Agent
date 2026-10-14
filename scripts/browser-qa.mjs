@@ -34,7 +34,7 @@ try {
   await send('你好');
   await waitDone();
   assert.match(await page.getByRole('log').innerText(), /已停止/);
-  assert.match(await page.getByRole('log').innerText(), /你好呀，我是 Step酱/);
+  assert.match(await page.getByRole('log').innerText(), /我看了看小房间/);
   await page.getByRole('button', { name: '收起聊天' }).click();
   await page.getByRole('button', { name: '打开聊天' }).click();
   await page.getByRole('button', { name: '清空会话' }).click();

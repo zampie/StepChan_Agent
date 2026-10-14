@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 import dotenv from 'dotenv';
 dotenv.config({ quiet: true });
+const providerKeys = [process.env.STEPFUN_API_KEY, process.env.OPENROUTER_API_KEY].filter(Boolean);
 const endpoint = 'http://127.0.0.1:3002';
 const server = spawn(process.execPath, ['apps/server/dist/index.js'], {
   env: { ...process.env, PORT: '3002' },
@@ -28,15 +29,30 @@ try {
     await delay(200);
   }
   assert.ok(ready, 'production did not start');
-  for (const path of ['/', '/debug/pet', '/assets/derived/blue_pet_512/expressions/neutral.png'])
+  for (const path of [
+    '/',
+    '/debug/pet',
+    '/audio-recorder.js',
+    '/assets/derived/blue_pet_512/expressions/neutral.png',
+  ])
     assert.equal((await fetch(endpoint + path)).status, 200);
-  const child = spawn(process.execPath, ['scripts/browser-qa.mjs'], {
+  const child = spawn(process.execPath, ['scripts/interaction-qa.mjs'], {
     env: { ...process.env, STEPCHAN_TEST_URL: endpoint },
     windowsHide: true,
     stdio: 'inherit',
   });
   const code = await new Promise((resolve) => child.on('exit', resolve));
   assert.equal(code, 0, 'browser QA failed');
+  const audioQa = spawn(process.execPath, ['scripts/audio-qa.mjs'], {
+    env: { ...process.env, STEPCHAN_TEST_URL: endpoint },
+    windowsHide: true,
+    stdio: 'inherit',
+  });
+  assert.equal(
+    await new Promise((resolve) => audioQa.on('exit', resolve)),
+    0,
+    'audio browser QA failed',
+  );
   const browser = await chromium.launch({ headless: true, channel: 'msedge' });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 940 } });
@@ -56,8 +72,8 @@ try {
     assert.equal(await page.getByRole('alert').count(), 0);
     assert.ok((await page.locator('.message.assistant').innerText()).length > 20);
     assert.deepEqual(pageErrors, []);
-    assert.ok(!JSON.stringify(requests).includes(process.env.OPENROUTER_API_KEY));
-    assert.ok(!requests.some((r) => r.url.includes('openrouter.ai')));
+    assert.ok(providerKeys.every((key) => !JSON.stringify(requests).includes(key)));
+    assert.ok(!requests.some((r) => /openrouter\.ai|api\.stepfun\.com/.test(r.url)));
     await page.screenshot({ path: 'artifacts/live-browser.png' });
     console.log(
       'Production browser live reply:',
@@ -78,7 +94,7 @@ try {
     if (stat.isFile()) {
       const data = await fs.readFile(path);
       assert.ok(
-        !data.includes(Buffer.from(process.env.OPENROUTER_API_KEY)),
+        providerKeys.every((key) => !data.includes(Buffer.from(key))),
         'secret in frontend bundle',
       );
       count++;

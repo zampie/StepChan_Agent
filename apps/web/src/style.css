@@ -399,6 +399,67 @@ nav a {
 .composer {
   padding: 13px 23px 22px;
 }
+.voice-controls {
+  margin-bottom: 10px;
+}
+.session-notice {
+  margin: 0;
+  padding: 10px 23px;
+  color: #3a6682;
+  background: #f1f8ff;
+  font-size: 12px;
+}
+.voice-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.voice-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid #d9e8f2;
+  border-radius: 12px;
+  background: #f6fbff;
+  color: #3a6682;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.voice-actions button[aria-pressed='true'] {
+  background: #dceffa;
+  border-color: #87c0e5;
+}
+.voice-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.voice-actions .hold-to-talk {
+  flex: 1;
+  min-width: 124px;
+  touch-action: none;
+  user-select: none;
+}
+.voice-actions .recording {
+  background: #e0f4f0;
+  color: #28695d;
+  border-color: #7fbdae;
+}
+.voice-controls > small {
+  display: block;
+  margin: 7px 2px 0;
+  color: #6b8293;
+  font-size: 11px;
+}
+.voice-error {
+  margin: 6px 2px;
+  color: #a43d3d;
+  font-size: 12px;
+}
 .input-wrap {
   position: relative;
   background: #f7f9fc;
@@ -907,4 +968,418 @@ nav a {
 }
 .settings-panel label + label {
   margin-top: 12px;
+}
+
+/* The room is a small playable scene; props sit around the character. */
+.room-illumination {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.5s,
+    background 0.5s;
+}
+.room-stage {
+  transition: background-color 0.6s;
+}
+.room-stage.lamp-off:not(.dark):not(.checker) {
+  background: #d7e0ef;
+}
+.room-stage .hello {
+  top: 118px;
+}
+.room-stage .hello h1 {
+  font-size: 21px;
+}
+.room-stage .pet-area {
+  inset: 188px 0 70px;
+}
+.room-stage .stage-orbit,
+.room-stage .stage-star,
+.room-stage .little-dot {
+  display: none;
+}
+.autonomy-controls {
+  position: absolute;
+  z-index: 4;
+  top: 66px;
+  left: 28px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.autonomy-controls button {
+  font-size: 12px;
+  padding: 6px 0;
+  border-radius: 20px;
+}
+.autonomy-controls small {
+  font-size: 10px;
+  color: #738ba6;
+}
+.autonomy-switch {
+  width: 26px;
+  height: 15px;
+  padding: 2px;
+  border-radius: 12px;
+  background: #c2cede;
+  transition: background 0.2s;
+}
+.autonomy-switch::after {
+  content: '';
+  display: block;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s;
+}
+.autonomy-switch.enabled {
+  background: #4d89bd;
+}
+.autonomy-switch.enabled::after {
+  transform: translateX(11px);
+}
+.room-window {
+  position: absolute;
+  width: 178px;
+  height: 202px;
+  top: 215px;
+  left: calc(50% - 89px);
+  border: 8px solid #ffffff80;
+  border-radius: 75px 75px 7px 7px;
+  box-shadow:
+    0 0 0 1px #c5d7ee,
+    0 10px 30px #abc7e720;
+  background: linear-gradient(#cedff8, #f6faff);
+  overflow: hidden;
+  opacity: 0.75;
+}
+.room-window::before,
+.room-window::after {
+  content: '';
+  position: absolute;
+  background: #ffffff90;
+}
+.room-window::before {
+  width: 5px;
+  height: 100%;
+  left: 50%;
+}
+.room-window::after {
+  height: 5px;
+  width: 100%;
+  top: 51%;
+}
+.room-window span,
+.room-window b {
+  position: absolute;
+  color: white;
+  left: 26px;
+  top: 30px;
+  font-size: 24px;
+  font-weight: 400;
+}
+.room-window b {
+  left: 106px;
+  top: 65px;
+  font-size: 17px;
+}
+.room-floor {
+  position: absolute;
+  inset: 67% 0 0;
+  background: #b8cde01a;
+  border-top: 1px solid #c7d8ec70;
+}
+.room-object {
+  position: absolute;
+  z-index: 3;
+  width: 112px;
+  text-align: center;
+}
+.room-object > button:first-child {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 5px;
+  padding: 4px;
+  border-radius: 16px;
+  transition:
+    transform 0.18s,
+    background 0.18s;
+}
+.room-object > button:first-child:hover {
+  background: #ffffff50;
+  transform: translateY(-3px);
+}
+.room-object > button:first-child > svg {
+  width: 92px;
+  height: 112px;
+  filter: drop-shadow(0 6px 9px #7492b013);
+}
+.room-object strong {
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.room-object small {
+  font-size: 10px;
+  color: #7188a1;
+  white-space: nowrap;
+}
+.object-lamp {
+  left: 5%;
+  top: 34%;
+}
+.object-plant {
+  right: 5%;
+  top: 34%;
+}
+.object-cards {
+  left: 5%;
+  bottom: 90px;
+}
+.object-timer {
+  right: 5%;
+  bottom: 75px;
+}
+.object-cards > button:first-child > svg {
+  height: 87px;
+}
+.object-timer > button:first-child > svg {
+  height: 95px;
+}
+.object-mini {
+  font-size: 10px;
+  color: #567dab;
+  padding: 5px 9px;
+  border-radius: 9px;
+  margin-top: 3px;
+}
+.moisture-meter {
+  height: 3px;
+  background: #cddfdd;
+  width: 52px;
+  border-radius: 5px;
+  margin: 9px auto;
+  overflow: hidden;
+}
+.moisture-meter i {
+  display: block;
+  height: 100%;
+  background: #7baa95;
+  transition: width 0.5s;
+}
+.water-drops {
+  animation: water-fall 1.2s ease-out both;
+}
+@keyframes water-fall {
+  from {
+    transform: translateY(-15px);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+}
+.discovery-card {
+  position: absolute;
+  z-index: 5;
+  bottom: 82px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(310px, 85%);
+  padding: 17px;
+  background: #fffcf3f5;
+  border: 1px solid #e4dcc4;
+  border-radius: 14px;
+  box-shadow: 0 10px 35px #49688221;
+  backdrop-filter: blur(10px);
+}
+.discovery-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #988366;
+  font-size: 11px;
+}
+.discovery-title span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.discovery-title button {
+  min-height: 28px;
+  min-width: 28px;
+  border-radius: 8px;
+}
+.discovery-card p {
+  font-size: 14px;
+  line-height: 1.7;
+  margin: 8px 0 13px;
+}
+.card-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.card-options button {
+  background: #fff;
+  border: 1px solid #e4dcc9;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+.card-options button:hover {
+  background: #f0e8d8;
+}
+.card-answer {
+  font-size: 12px;
+  line-height: 1.8;
+  color: #766954;
+}
+.card-next {
+  font-size: 11px;
+  color: #687ca2;
+  margin-top: 12px;
+  padding: 5px 0;
+}
+.suggestion-bar {
+  flex-shrink: 0;
+  padding: 12px 22px 5px;
+  border-top: 1px solid #edf1f7;
+}
+.suggestion-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  color: #8a99ac;
+  margin-bottom: 7px;
+}
+.suggestion-heading button {
+  border-radius: 6px;
+  padding: 4px;
+}
+.suggestion-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.suggestion-buttons button {
+  border: 1px solid #dee7f4;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  color: #58789f;
+  background: #f6f9fd;
+}
+.suggestion-buttons button:hover {
+  background: #e7f0fc;
+  border-color: #b6cdea;
+}
+.interrupt-stop {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  color: #7185a0;
+}
+.room-stage .stage-footer {
+  gap: 15px;
+  z-index: 3;
+  pointer-events: none;
+}
+.room-stage .stage-footer > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-stage .stage-footer small {
+  flex-shrink: 0;
+}
+@media (min-width: 731px) and (max-width: 1100px) {
+  .room-object {
+    width: 86px;
+  }
+  .room-object > button:first-child > svg {
+    width: 72px;
+    height: 90px;
+  }
+  .object-lamp,
+  .object-cards {
+    left: 1%;
+  }
+  .object-plant,
+  .object-timer {
+    right: 1%;
+  }
+  .room-stage .hello h1 {
+    font-size: 17px;
+  }
+}
+@media (max-width: 730px) {
+  .room-stage {
+    height: 580px;
+  }
+  .room-stage .hello {
+    top: 94px;
+  }
+  .room-stage .hello h1 {
+    font-size: 18px;
+  }
+  .room-stage .pet-area {
+    inset: 167px 0 72px;
+  }
+  .autonomy-controls {
+    top: 53px;
+    left: 20px;
+  }
+  .room-window {
+    top: 174px;
+    width: 140px;
+    height: 177px;
+    left: calc(50% - 70px);
+  }
+  .room-object {
+    width: 85px;
+  }
+  .room-object > button:first-child > svg {
+    width: 69px;
+    height: 84px;
+  }
+  .object-lamp,
+  .object-cards {
+    left: 1%;
+  }
+  .object-plant,
+  .object-timer {
+    right: 1%;
+  }
+  .object-lamp,
+  .object-plant {
+    top: 32%;
+  }
+  .object-cards {
+    bottom: 84px;
+  }
+  .object-timer {
+    bottom: 70px;
+  }
+  .room-stage .stage-footer {
+    font-size: 10px;
+    bottom: 23px;
+  }
+  .room-stage .stage-footer small {
+    display: none;
+  }
+  .suggestion-bar {
+    padding-inline: 17px;
+  }
+  .suggestion-buttons button {
+    min-height: 36px;
+  }
 }
