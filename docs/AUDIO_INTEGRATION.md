@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- 声音开关默认关闭，试听可以独立播放。`stepaudio-3-tts` 底音改为 `qingchunshaonv`；服务端固定 instruction 要求清亮、稚嫩、活泼可爱，像小学生分享新发现。没有克隆真人声音。语音年龄感是合成风格目标，不代表客观验证的年龄或质量。
+- 声音开关默认关闭，试听可以独立播放。`stepaudio-3-tts` 当前底音为 `livelybreezy-female`（活力轻快）；用户试听认为 `qingchunshaonv` 更成熟，因此换回原底音。服务端 instruction 保留其自然亲近感，微调为清脆、轻盈、有童真的聊天语气，音调略高，使用短而自然的停顿，句尾轻轻上扬，不拉长尾音或刻意夹嗓。没有克隆真人声音。语音年龄感是合成风格目标，不代表客观验证的年龄或质量。
 - 模型回复按标点/换行分句，长句每段最多 180 字，单轮最多 8 段。串行合成与播放重叠，播放顺序固定。去除代码块、链接地址、Markdown 标记及括号指令；不直接朗读工具参数。
 - 浏览器 Web Audio 播放 WAV，AnalyserNode 实测振幅驱动 neutral 嘴型；非 neutral 不叠嘴，没有新造的骨骼动画。
 - 按住按钮或键盘空格/Enter 录音，松开转写，Escape 取消。AudioWorklet 采集 PCM，编码为真实单声道 24kHz PCM16 WAV，最长 30 秒。无 WebM 改后缀伪装；静音连接不回放麦克风。
@@ -30,6 +30,8 @@
 - 本地证据（Git 忽略）：`artifacts/audio-live-result.json`、`audio-browser-live.json`、`stepchan-young-voice.wav`、`audio-desktop.png`、`audio-mobile.png`。应用不会自动写这些文件，只有手动 QA 脚本生成。
 
 ## 当前限制
+
+2026-10-14 音色微调复验：运行服务的 `/api/health` 确认 `livelybreezy-female`；新指令通过真实 TTS 生成 `artifacts/stepchan-lively-refined.wav`（243406 字节，完整请求约 4.45 秒）。类型检查、5 项音频测试和服务端构建通过。上文 5.84 秒的样本是初次接入时的音色记录，未用新样本覆盖；新声音的主观效果待用户试听。
 
 这是按住说话 + 文本对话 + 短句朗读，不是 Realtime 全双工。未加入自动 VAD、边录边识别、纯语音「实际听到多少」历史裁剪。当前可见文本继续作为对话上下文；停止播放不宣称用户已听完整句。句间可能等待合成，长回复最多读 8 段，其余仍显示文字。声音默认不自动开启，浏览器播放策略要求主动点击。
 

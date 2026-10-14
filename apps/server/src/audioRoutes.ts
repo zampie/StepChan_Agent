@@ -4,12 +4,12 @@ import { readSSE } from '../../../shared/sse';
 import { spokenText } from '../../../shared/audio';
 
 export const voiceInstruction =
-  '清亮、稚嫩的女孩子声音，像活泼可爱的小学生和朋友分享新发现。音区偏高，轻盈明亮，充满好奇和童真，语速轻快但咬字清楚，句尾自然上扬。避免成熟低沉、气声、播音腔和客服腔，不要刻意夹嗓或过分撒娇。';
+  '保留原音色活力轻快、自然亲近的特点。像活泼的小学生和好朋友分享新发现：声音清脆明亮、轻盈有童真，带一点开心的笑意和好奇。音调比平常略高，语速轻快，吐字清楚，用短而自然的停顿；句尾只轻轻上扬。用日常聊天的音量，不拉长尾音，不刻意夹嗓或撒娇，不用成熟的气声、播音腔或客服腔。';
 export const audioConfig = () => ({
   configured: !!process.env.STEPFUN_API_KEY,
   ttsModel: 'stepaudio-3-tts',
   asrModel: 'stepaudio-3-asr-max',
-  voice: process.env.STEPFUN_TTS_VOICE || 'qingchunshaonv',
+  voice: process.env.STEPFUN_TTS_VOICE || 'livelybreezy-female',
 });
 export function validRecording(wav: Buffer): boolean {
   if (

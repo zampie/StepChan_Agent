@@ -53,7 +53,7 @@ test('audio routes keep configuration server-side, validate recordings, sanitize
     globalThis.fetch = async (_url, init) => {
       calls++;
       const body = JSON.parse(String(init?.body));
-      assert.equal(body.voice, process.env.STEPFUN_TTS_VOICE || 'qingchunshaonv');
+      assert.equal(body.voice, process.env.STEPFUN_TTS_VOICE || 'livelybreezy-female');
       assert.equal(body.model, 'stepaudio-3-tts');
       assert.equal(body.input, '你好');
       assert.match(body.instruction, /小学生/);
