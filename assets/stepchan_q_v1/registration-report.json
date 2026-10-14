@@ -210,18 +210,23 @@
       "reason": ""
     },
     "mouth.round": {
-      "ok": false,
-      "diffRatio": 0.00061,
-      "coreRatio": 0.01555,
-      "silhouetteXor": 0.00799,
+      "ok": true,
+      "diffRatio": 0.00273,
+      "coreRatio": 0.03214,
+      "silhouetteXor": 0.00951,
       "roi": [
-        484,
-        436,
-        532,
-        476
+        476,
+        428,
+        540,
+        492
       ],
-      "bbox": null,
-      "reason": "改动量 0.00061 低于下限 0.0008：模型实际没改动这个部位，做成覆盖层等于裁一块空白"
+      "bbox": [
+        487,
+        436,
+        528,
+        482
+      ],
+      "reason": ""
     },
     "mouth.smile": {
       "ok": true,
@@ -412,9 +417,9 @@
       "max": 255
     },
     "mouth.round": {
-      "transparent": 68.02,
-      "opaque": 29.69,
-      "edge": 2.29,
+      "transparent": 68.03,
+      "opaque": 29.64,
+      "edge": 2.33,
       "max": 255
     },
     "mouth.smile": {
@@ -472,27 +477,21 @@
       "max": 255
     },
     "action.point": {
-      "transparent": 68.1,
-      "opaque": 29.47,
-      "edge": 2.42,
+      "transparent": 67.84,
+      "opaque": 29.8,
+      "edge": 2.36,
       "max": 255
     },
     "action.hold": {
-      "transparent": 68.04,
-      "opaque": 29.73,
-      "edge": 2.23,
+      "transparent": 68.03,
+      "opaque": 29.64,
+      "edge": 2.33,
       "max": 255
     },
     "action.jump": {
       "transparent": 65.74,
       "opaque": 31.85,
       "edge": 2.41,
-      "max": 255
-    },
-    "action.tilt": {
-      "transparent": 69.13,
-      "opaque": 28.51,
-      "edge": 2.37,
       "max": 255
     },
     "action.walk_a": {
@@ -521,14 +520,14 @@
     },
     "fx.zzz": {
       "transparent": 65.07,
-      "opaque": 25.22,
-      "edge": 9.71,
+      "opaque": 29.0,
+      "edge": 5.94,
       "max": 255
     },
     "fx.heart": {
-      "transparent": 47.66,
-      "opaque": 4.44,
-      "edge": 47.9,
+      "transparent": 47.02,
+      "opaque": 49.65,
+      "edge": 3.33,
       "max": 255
     },
     "fx.exclaim": {
@@ -607,9 +606,9 @@
       "subject": 29.28
     },
     "mouth.round": {
-      "bg": 68.0,
-      "edge": 2.71,
-      "subject": 29.29
+      "bg": 68.01,
+      "edge": 2.73,
+      "subject": 29.26
     },
     "mouth.smile": {
       "bg": 67.99,
@@ -637,24 +636,19 @@
       "subject": 32.1
     },
     "action.point": {
-      "bg": 68.09,
-      "edge": 2.96,
-      "subject": 28.95
+      "bg": 67.83,
+      "edge": 2.86,
+      "subject": 29.32
     },
     "action.hold": {
-      "bg": 68.02,
+      "bg": 68.01,
       "edge": 2.81,
-      "subject": 29.16
+      "subject": 29.17
     },
     "action.jump": {
       "bg": 65.72,
       "edge": 3.25,
       "subject": 31.02
-    },
-    "action.tilt": {
-      "bg": 69.11,
-      "edge": 2.8,
-      "subject": 28.09
     },
     "action.walk_a": {
       "bg": 70.41,
@@ -676,7 +670,8 @@
         994
       ],
       "height_vs_master": 1.012,
-      "width_vs_master": 1.005
+      "width_vs_master": 1.005,
+      "silhouetteXorVsIdle": 0.104
     },
     "sit": {
       "bbox": [
@@ -686,7 +681,8 @@
         994
       ],
       "height_vs_master": 0.913,
-      "width_vs_master": 1.179
+      "width_vs_master": 1.179,
+      "silhouetteXorVsIdle": 0.3836
     },
     "sleep": {
       "bbox": [
@@ -696,27 +692,30 @@
         994
       ],
       "height_vs_master": 0.677,
-      "width_vs_master": 1.598
+      "width_vs_master": 1.598,
+      "silhouetteXorVsIdle": 1.0269
     },
     "point": {
       "bbox": [
-        209,
-        28,
-        815,
+        212,
+        26,
+        811,
         994
       ],
-      "height_vs_master": 1.003,
-      "width_vs_master": 1.002
+      "height_vs_master": 1.005,
+      "width_vs_master": 0.99,
+      "silhouetteXorVsIdle": 0.1066
     },
     "hold": {
       "bbox": [
         209,
         32,
         814,
-        993
+        994
       ],
-      "height_vs_master": 0.998,
-      "width_vs_master": 1.0
+      "height_vs_master": 0.999,
+      "width_vs_master": 1.0,
+      "silhouetteXorVsIdle": 0.0342
     },
     "jump": {
       "bbox": [
@@ -726,17 +725,8 @@
         994
       ],
       "height_vs_master": 0.987,
-      "width_vs_master": 1.251
-    },
-    "tilt": {
-      "bbox": [
-        218,
-        58,
-        805,
-        994
-      ],
-      "height_vs_master": 0.972,
-      "width_vs_master": 0.97
+      "width_vs_master": 1.251,
+      "silhouetteXorVsIdle": 0.2775
     },
     "walk_a": {
       "bbox": [
@@ -746,7 +736,8 @@
         993
       ],
       "height_vs_master": 0.981,
-      "width_vs_master": 0.98
+      "width_vs_master": 0.98,
+      "silhouetteXorVsIdle": 0.2773
     },
     "walk_b": {
       "bbox": [
@@ -756,7 +747,8 @@
         994
       ],
       "height_vs_master": 0.993,
-      "width_vs_master": 0.957
+      "width_vs_master": 0.957,
+      "silhouetteXorVsIdle": 0.3353
     }
   },
   "thresholds": {
@@ -819,18 +811,37 @@
         "lost": [],
         "needed_retry": {},
         "wall_clock_s": 54.0
+      },
+      {
+        "fx_mode": "edit_blank",
+        "total": 1,
+        "ok": 1,
+        "skipped": 0,
+        "lost": [],
+        "needed_retry": {},
+        "wall_clock_s": 66.6
+      },
+      {
+        "fx_mode": "edit_blank",
+        "total": 3,
+        "ok": 3,
+        "skipped": 0,
+        "lost": [],
+        "needed_retry": {},
+        "wall_clock_s": 67.8
+      },
+      {
+        "fx_mode": "edit_blank",
+        "total": 1,
+        "ok": 1,
+        "skipped": 0,
+        "lost": [],
+        "needed_retry": {},
+        "wall_clock_s": 67.5
       }
     ]
   },
   "degraded": [
-    {
-      "name": "mouth.round",
-      "reason": "改动量 0.00061 低于下限 0.0008：模型实际没改动这个部位，做成覆盖层等于裁一块空白"
-    },
-    {
-      "name": "expression.surprised",
-      "reason": "覆盖层降级且无整脸备图（mouth.round）→ 该表情退化为中性五官"
-    },
     {
       "name": "expression.shy",
       "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
@@ -842,6 +853,10 @@
     {
       "name": "expression.sad",
       "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
+    },
+    {
+      "name": "action.tilt",
+      "reason": "无独立姿势素材：三版 prompt 都失败（v1 泛泛描述 / v2 中英双写点名角度 / v3 改成描述成品并用呆毛朝向当硬指标）；v3 只让呆毛倒向一侧，头和两眼连线仍是水平的，220 px 下与 idle 无法区分。改由渲染器对 idle 整身图做程序化旋转实现 —— 头身比 40% 的 Q 版角色，整体倾斜在视觉上就读作歪头。改由渲染器程序化实现（见 apps/web/src/pet/RigRenderer.ts 的 PROCEDURAL_ACTIONS），调用方仍应提供该动作"
     }
   ],
   "layer_modes": {

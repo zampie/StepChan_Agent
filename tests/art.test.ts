@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { inflateSync } from 'node:zlib';
 import { availableActions, isNoopAction } from '../apps/web/src/pet';
 import {
   actions,
@@ -223,4 +226,109 @@ function pngSize(file: string) {
 test('pngSize 能正确读出 base 的尺寸（自检，防止读错字节偏移）', () => {
   const s = pngSize(path.join(rigDir, manifest.base.file));
   assert.equal(s.width, manifest.canvas.width);
+});
+
+/**
+ * 解出 8-bit RGBA PNG 的 alpha 通道。只支持 colorType 6 / bitDepth 8 —— 流水线只产这一种，
+ * 遇到别的直接断言失败而不是悄悄放过。
+ */
+function pngAlpha(file: string) {
+  const buf = readFileSync(file);
+  let off = 8;
+  let w = 0;
+  let h = 0;
+  const idat: Buffer[] = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.subarray(off + 4, off + 8).toString('latin1');
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      assert.equal(data[8], 8, `${file} 不是 8-bit`);
+      assert.equal(data[9], 6, `${file} 不是 RGBA（colorType 6）`);
+      assert.equal(data[12], 0, `${file} 用了 interlace，解析器不支持`);
+    } else if (type === 'IDAT') idat.push(Buffer.from(data));
+    else if (type === 'IEND') break;
+    off += 12 + len;
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  const bpp = 4;
+  const stride = w * bpp;
+  const out = new Uint8Array(w * h);
+  const prev = new Uint8Array(stride);
+  const cur = new Uint8Array(stride);
+  let p = 0;
+  for (let y = 0; y < h; y++) {
+    const filter = raw[p++];
+    for (let i = 0; i < stride; i++) {
+      const x = raw[p + i];
+      const a = i >= bpp ? cur[i - bpp] : 0;
+      const b = prev[i];
+      const c = i >= bpp ? prev[i - bpp] : 0;
+      let v: number;
+      if (filter === 0) v = x;
+      else if (filter === 1) v = x + a;
+      else if (filter === 2) v = x + b;
+      else if (filter === 3) v = x + ((a + b) >> 1);
+      else if (filter === 4) {
+        const pa = Math.abs(b - c);
+        const pb = Math.abs(a - c);
+        const pc = Math.abs(a + b - 2 * c);
+        v = x + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+      } else throw new Error(`未知 PNG 过滤器 ${filter}`);
+      cur[i] = v & 0xff;
+    }
+    p += stride;
+    for (let x = 0; x < w; x++) out[y * w + x] = cur[x * bpp + 3];
+    prev.set(cur);
+  }
+  return out;
+}
+
+// alpha.py 的两条实测事实必须在最终产物上成立，否则后处理等于没做：
+//   1. gpt-image-2 的主体 alpha 上限只到 253–254，一个 255 都没有 → 必须阈值化
+//   2. 透明背景产物带约 1.5% 的 a<16 极淡光晕 → 叠在深色桌面上会显出白雾，必须抹掉
+test('产物里没有 0 < alpha < 16 的淡光晕（深色桌面上会显成一圈白雾）', () => {
+  for (const a of allAssets()) {
+    if (a.width <= 2) continue; // 1×1 空操作没有内容
+    const alpha = pngAlpha(path.join(rigDir, a.file));
+    let halo = 0;
+    for (const v of alpha) if (v > 0 && v < 16) halo += 1;
+    assert.equal(halo, 0, `${a.name} 还有 ${halo} 个 a<16 的光晕像素 —— clean_alpha 没生效`);
+  }
+});
+
+test('每张产物都有真正不透明的像素（alpha 已阈值化到 255）', () => {
+  for (const a of allAssets()) {
+    if (a.width <= 2) continue;
+    const alpha = pngAlpha(path.join(rigDir, a.file));
+    let full = 0;
+    for (const v of alpha) if (v === 255) full += 1;
+    assert.ok(
+      full > 0,
+      `${a.name} 一个 alpha=255 的像素都没有 —— gpt-image-2 的 253 上限没被拉满`,
+    );
+  }
+});
+
+test('1×1 身份项确实是全透明的（空操作，不是一块纯色）', () => {
+  for (const a of allAssets()) {
+    if (a.width !== 1 || a.height !== 1) continue;
+    assert.equal(pngAlpha(path.join(rigDir, a.file))[0], 0, `${a.name} 的 1×1 贴图不是全透明`);
+  }
+});
+
+// alpha.py / chroma.py 的合成输入用例在 Python 侧（tools/art/selftest.py），
+// 因为被测对象就是 Python。这里只负责把它接进 npm test，并在失败时把详情原样抛出。
+test('tools/art 的 alpha / chroma helper 合成输入自测', (t) => {
+  const py = path.join(homedir(), 'Desktop/gpt-image-lab/.venv/bin/python');
+  if (!existsSync(py)) {
+    // 整条素材流水线都依赖这个 venv（Pillow）。没有它就跑不了流水线，也跑不了这组测试。
+    t.skip(`缺少 ${py} —— 素材流水线的 venv 不在，跳过 Python helper 自测`);
+    return;
+  }
+  const r = spawnSync(py, [path.join(root, 'tools/art/selftest.py')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `tools/art/selftest.py 失败：\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, /0 条失败/, `自测输出不符合预期：\n${r.stdout}`);
 });

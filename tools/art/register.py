@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from PIL import Image, ImageChops, ImageDraw, ImageFilter  # noqa: E402
 
 from alpha import alpha_report, clean_alpha, content_bbox, sha256_file  # noqa: E402
-from chroma import chroma_key, key_ratio  # noqa: E402
+from chroma import chroma_key, chroma_key_flood, key_ratio  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = ROOT / "assets" / "stepchan_q_v1"
@@ -427,10 +427,14 @@ def trim_fx(im: Image.Image) -> Image.Image:
     """特效图：抠紧后放进正方形画布，留 6% 边。
 
     两种来源都要兼容：generations 的产物自带 alpha；edit_blank 的产物是 RGB，
-    需要先做品红抠像。按通道判断，不靠记哪张是哪条路出来的。
+    需要先抠像。按通道判断，不靠记哪张是哪条路出来的。
+
+    特效走 chroma_key_flood（只抠边缘连通的背景）而不是 chroma_key：
+    特效的配色里有粉色，按颜色距离抠会把粉色填充一起吃掉（实测 heart 只剩一圈描边）。
+    角色图继续走 chroma_key —— 冰蓝/青/肤色/深棕都离品红很远，而且那条路已经验证过。
     """
     if "A" not in im.getbands():
-        im = chroma_key(im)
+        im = chroma_key_flood(im)
     im = clean_alpha(im)
     im = im.crop(content_bbox(im))
     side = max(im.width, im.height)

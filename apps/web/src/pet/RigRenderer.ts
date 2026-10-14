@@ -376,6 +376,11 @@ export class RigRenderer {
     this.app.stage.addChild(this.root);
   }
 
+  /** 覆盖层当前是否成立。程序化动作用的是 idle 的图，画幅没变，覆盖层继续有效。 */
+  private layersActive() {
+    return this.action === 'idle' || proceduralActions.has(this.action);
+  }
+
   private setLayersVisible(on: boolean) {
     for (const slot of [this.eyes, this.brow, this.mouth]) {
       if (!slot) continue;
@@ -460,13 +465,13 @@ export class RigRenderer {
       if (this.baseFade >= 1) this.basePrev.visible = false;
     }
     this.faceSprite.alpha += (this.faceSpriteTarget - this.faceSprite.alpha) * Math.min(1, step);
-    this.faceSprite.visible = this.faceSprite.alpha > 0.002 && this.action === 'idle';
+    this.faceSprite.visible = this.faceSprite.alpha > 0.002 && this.layersActive();
     this.blush.alpha += (this.blushTarget - this.blush.alpha) * Math.min(1, step);
   }
 
   private stepFace(dtMs: number) {
     const m = this.manifest!;
-    if (this.action !== 'idle' || this.faceSpriteTarget > 0.5) return;
+    if (!this.layersActive() || this.faceSpriteTarget > 0.5) return;
 
     // 口型优先级：显式覆盖 > 音频电平 > 表情静息口型。
     let viseme: Viseme = this.restingMouth;

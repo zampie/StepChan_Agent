@@ -76,18 +76,21 @@ def chroma_key(
 
 
 def _despill(im: Image.Image, key: tuple[int, int, int]) -> Image.Image:
-    """压掉边缘残留的 key 色溢出。
+    """压掉**边缘过渡带**里残留的 key 色溢出。
 
-    只在 G 通道低于 R、B 的像素上生效（即「偏品红」），把 R、B 压到不高于 G 与原值的较大者，
-    这样角色本身的粉色腮红（R 高、G 中、B 中，G 并不显著低）不会被动到。
+    只处理 0 < alpha < 255 的像素。不透明的内部像素不可能混进背景色，
+    对它们做 despill 是纯粹的破坏 —— 实测特效 heart 的填充 (249,81,144)
+    满足 min(R,B)-G = 63 > 60，被压成了 (141,81,141) 的深紫色。
+    判据从「颜色像不像品红」改成「这个像素是不是半透明」，
+    因为后者才是「可能混了背景」的真正条件。
     """
     r, g, b, a = im.split()
-    rd, gd, bd = list(r.getdata()), list(g.getdata()), list(b.getdata())
+    rd, gd, bd, ad = list(r.getdata()), list(g.getdata()), list(b.getdata()), list(a.getdata())
     out_r, out_b = [], []
     for i in range(len(rd)):
-        rv, gv, bv = rd[i], gd[i], bd[i]
-        spill = min(rv, bv) - gv
-        if spill > 60:
+        rv, gv, bv, av = rd[i], gd[i], bd[i], ad[i]
+        # 只有过渡带才可能混进 key 色。
+        if 0 < av < 255 and min(rv, bv) - gv > 60:
             limit = gv + 60
             out_r.append(min(rv, limit))
             out_b.append(min(bv, limit))
@@ -119,3 +122,76 @@ def key_ratio(im: Image.Image, key: tuple[int, int, int] = KEY, bg_dist: int = B
         "edge": round(100 * edge / n, 2),
         "subject": round(100 * (n - bgp - edge) / n, 2),
     }
+
+
+def _distance(im: Image.Image, key: tuple[int, int, int]) -> list[int]:
+    """逐像素到 key 的通道最大差。"""
+    r, g, b = im.convert("RGB").split()
+    kr, kg, kb = key
+    dr = r.point(lambda v, k=kr: abs(v - k))
+    dg = g.point(lambda v, k=kg: abs(v - k))
+    db = b.point(lambda v, k=kb: abs(v - k))
+    return [max(a, c, d) for a, c, d in zip(dr.getdata(), dg.getdata(), db.getdata(), strict=True)]
+
+
+def chroma_key_flood(
+    im: Image.Image,
+    key: tuple[int, int, int] = KEY,
+    bg_dist: int = BG_DIST,
+    edge_dist: int = EDGE_DIST,
+) -> Image.Image:
+    """只抠「从画面边缘连通过来的」背景，不按全图颜色距离抠。
+
+    为什么需要它：按颜色距离抠会吃掉和 key 色接近的主体。实测特效 heart 的粉色填充
+    (255,120,160) 到品红 (255,0,255) 的通道最大差只有 135，落在 90–200 的过渡带里，
+    结果整颗心的填充被抠成半透明，只剩一圈描边 —— 产物肉眼就能看出是坏的。
+
+    换 key 色解决不了：特效用到的青色 (20,182,197) 离纯绿只有 197，离纯蓝只有 182，
+    粉色离纯红只有 160。没有哪个单一 key 色能同时远离黄/青/粉/白/深描边这五种颜色。
+
+    「背景是从边缘连通的一整片」这个结构性事实比颜色更可靠。角色图不走这条路
+    （品红对冰蓝/青/肤色/深棕完全够用，而且那条路的产物已经验证过了，不动）。
+    """
+    w, h = im.size
+    dist = _distance(im, key)
+    # 候选背景：颜色上「可能是背景」的像素。主体内部的粉色也可能落进来，靠连通性排除。
+    cand = bytearray(1 if d <= edge_dist else 0 for d in dist)
+
+    # 从四条边界出发做洪水填充，只有真正连通到边缘的候选才算背景。
+    seen = bytearray(w * h)
+    stack: list[int] = []
+    for x in range(w):
+        for i in (x, (h - 1) * w + x):
+            if cand[i] and not seen[i]:
+                seen[i] = 1
+                stack.append(i)
+    for y in range(h):
+        for i in (y * w, y * w + w - 1):
+            if cand[i] and not seen[i]:
+                seen[i] = 1
+                stack.append(i)
+    while stack:
+        i = stack.pop()
+        x = i % w
+        if x > 0 and cand[i - 1] and not seen[i - 1]:
+            seen[i - 1] = 1
+            stack.append(i - 1)
+        if x < w - 1 and cand[i + 1] and not seen[i + 1]:
+            seen[i + 1] = 1
+            stack.append(i + 1)
+        if i >= w and cand[i - w] and not seen[i - w]:
+            seen[i - w] = 1
+            stack.append(i - w)
+        if i < w * (h - 1) and cand[i + w] and not seen[i + w]:
+            seen[i + w] = 1
+            stack.append(i + w)
+
+    span = max(1, edge_dist - bg_dist)
+    alpha = Image.new("L", im.size)
+    alpha.putdata([
+        (0 if dist[i] <= bg_dist else int(255 * (dist[i] - bg_dist) / span)) if seen[i] else 255
+        for i in range(w * h)
+    ])
+    out = im.convert("RGB").convert("RGBA")
+    out.putalpha(alpha)
+    return clean_alpha(_despill(out, key))

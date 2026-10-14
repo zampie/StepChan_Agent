@@ -5,7 +5,7 @@
     "model": "gpt-image-2",
     "masterQuality": "medium",
     "variantQuality": "medium",
-    "generatedAt": "2026-10-14T17:00:25+0800"
+    "generatedAt": "2026-10-14T17:19:31+0800"
   },
   "canvas": {
     "width": 512,
@@ -155,12 +155,12 @@
       },
       "round": {
         "file": "rig/mouth-round.png",
-        "sha256": "c2153f77e11087fcb078ae38527fa83bef29791e3700e30cc87fec4405a66d0f",
-        "width": 1,
-        "height": 1,
-        "x": 0,
-        "y": 0,
-        "diffRatio": 0.0
+        "sha256": "23d185d93cf4beefac05c8f9cd965a0e790964cb5e8ed6431180950d14406d04",
+        "width": 21,
+        "height": 23,
+        "x": 243,
+        "y": 218,
+        "diffRatio": 0.00273
       },
       "smile": {
         "file": "rig/mouth-smile.png",
@@ -222,7 +222,7 @@
       "mode": "layers",
       "eyes": "wide",
       "brow": "raised",
-      "mouth": "closed",
+      "mouth": "round",
       "blush": false
     },
     "proud": {
@@ -294,13 +294,13 @@
     },
     "point": {
       "file": "rig/action-point.png",
-      "sha256": "294c98064fe444714be965706ad215111069fe25b98fd2512b308b5329345273",
+      "sha256": "e14fd96631458893f43f859cd916373c6017cd6e0200f7bb8c3ec1d90115c593",
       "width": 512,
       "height": 512
     },
     "hold": {
       "file": "rig/action-hold.png",
-      "sha256": "35e3fdb0e55f4f233532590b2b5ee179bc968c29bdb2cbcd1cff5be98cf0e404",
+      "sha256": "739fae83ed67473cc57589df920b6b63e350aa279a761fb7a0fa2f4f061b6f24",
       "width": 512,
       "height": 512
     },
@@ -311,8 +311,8 @@
       "height": 512
     },
     "tilt": {
-      "file": "rig/action-tilt.png",
-      "sha256": "7fee56acb0685cedd651bb68eae1f344745ded87fbc8df180195fb542194ec0a",
+      "file": "rig/base.png",
+      "sha256": "fad6e2d0ffe0c5d836d1cab67fd3d2009b6c569e95aa55cd3366ac5e29a03c68",
       "width": 512,
       "height": 512
     },
@@ -344,13 +344,13 @@
     },
     "zzz": {
       "file": "rig/fx-zzz.png",
-      "sha256": "e7de4595da83aa1dc854a278e74461c974ec770552a0ef704aa956a4d67feb29",
+      "sha256": "fc239b43eba345003c6d7feb9c9302e16a67e8ac52042ec709f60ce67e801abc",
       "width": 256,
       "height": 256
     },
     "heart": {
       "file": "rig/fx-heart.png",
-      "sha256": "3a6108c5549a49d98604f9f61c265a75a2b9429d829289b9fa48cef3bba17b40",
+      "sha256": "00d0ac942e87a9236f60d8facb78c9dc05b4a4d76930b72cfc84083188529c04",
       "width": 256,
       "height": 256
     },
@@ -375,14 +375,6 @@
   },
   "degraded": [
     {
-      "name": "mouth.round",
-      "reason": "改动量 0.00061 低于下限 0.0008：模型实际没改动这个部位，做成覆盖层等于裁一块空白"
-    },
-    {
-      "name": "expression.surprised",
-      "reason": "覆盖层降级且无整脸备图（mouth.round）→ 该表情退化为中性五官"
-    },
-    {
       "name": "expression.shy",
       "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
     },
@@ -393,6 +385,10 @@
     {
       "name": "expression.sad",
       "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
+    },
+    {
+      "name": "action.tilt",
+      "reason": "无独立姿势素材：三版 prompt 都失败（v1 泛泛描述 / v2 中英双写点名角度 / v3 改成描述成品并用呆毛朝向当硬指标）；v3 只让呆毛倒向一侧，头和两眼连线仍是水平的，220 px 下与 idle 无法区分。改由渲染器对 idle 整身图做程序化旋转实现 —— 头身比 40% 的 Q 版角色，整体倾斜在视觉上就读作歪头。改由渲染器程序化实现（见 apps/web/src/pet/RigRenderer.ts 的 PROCEDURAL_ACTIONS），调用方仍应提供该动作"
     }
   ]
 }

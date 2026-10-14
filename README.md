@@ -1,114 +1,151 @@
-# Step酱 Web MVP
+# Step酱 · 桌面宠物
 
-本地运行的 AI 探索伙伴：真实立绘、流式聊天、可点击的小房间、部位触碰、常驻交互建议、可打断对话、自主探索与语音输入/朗读。React + TypeScript + Vite + PixiJS 8；Node.js + Fastify。
+macOS 桌面上一个无背景、常驻置顶的 AI 桌宠。全双工实时语音，可以随时打断；分层骨架 + 程序化动画；
+菜单栏配置；在你允许的前提下，她能看一眼你的屏幕、知道你在用什么应用、接住你拖过去的文件。
 
-**当前进度（2026-10-14）：** 见 [PROGRESS.md](PROGRESS.md)，包含已实现范围、验证证据、已知限制和下一步。
+Tauri 2 + React 19 + PixiJS 8 + Rust。没有服务端进程，产物就是一个 `.app`。
 
-## 立即运行
+**当前状态与验证证据见 [PROGRESS.md](PROGRESS.md)** —— 里面写清了哪些真跑过、哪些还没验。
 
-已验证 Node.js **24.21.0**、npm **11.12.1**（要求 Node >=22.12）。在项目根目录执行：
+## 运行
 
-```powershell
-npm.cmd ci
-npm.cmd run dev
+需要 Node ≥ 22.12（实测 26.8.1）、Rust（实测 1.98.1）、macOS 13+（实测 26.6.2）。
+
+```bash
+cp .env.example .env     # 填 STEPFUN_API_KEY
+npm install
+npm run dev
 ```
 
-打开 http://127.0.0.1:5173 ，角色实验室在 http://127.0.0.1:5173/debug/pet 。后端地址为 http://127.0.0.1:3001 。所有服务只绑定本机。
+**语音功能必须在打包产物上验收，`tauri dev` 下麦克风可能静默失败** —— dev 跑的是裸二进制，
+不是带 usage description 和 entitlements 的签名 bundle：
 
-- 没有密钥时，演示模式也能独立工作；回复是明确标识的预设内容，房间工具、时间查询和链接校验仍执行真实逻辑。
-- 本次已将提供的密钥写入根目录 `.env`（已被 `.gitignore` 排除）。它仅由后端读取，前端不接触凭据。页面检测到服务端配置后默认真实模型。
-- 新环境先复制 `.env.example` 为 `.env`，填写 `STEPFUN_API_KEY`；修改后重启开发服务。不要使用 `VITE_` 前缀。旧 `config/server.env.example` 是启动包历史模板，当前不加载它。
-- 当前 Provider：StepFun 官方 `https://api.stepfun.com/v1`，默认模型为 `step-3.7-flash`；`.env` 中注释保留 `step-5-preview` 以便切回。`MAX_TOKENS=1024`，`reasoning_effort=low`。
-- 原 OpenRouter 配置在 `.env` 中注释保留。切换时只启用一个 `LLM_PROVIDER`：`stepfun` 或 `openrouter`，并取消相应密钥和模型配置的注释，然后重启服务。两种接口使用各自的密钥，不自动跨服务回退。
-
-生产模式（单个本地端口）：
-
-```powershell
-npm.cmd run build
-npm.cmd start
+```bash
+npm run build:debug
+open "apps/desktop/src-tauri/target/debug/bundle/macos/Step酱.app"
 ```
 
-打开 http://127.0.0.1:3001 。构建产物仍需要仓库里的 `prompts/` 和根目录 `.env`，不要单独搬走服务端 JS。停止运行使用终端 Ctrl+C。
+从构建产物目录直接打开**不会被 Gatekeeper 拦**（quarantine 属性只在下载/AirDrop 时附加）。
+完整的人工验收清单见 [docs/DESKTOP_QA.md](docs/DESKTOP_QA.md)。
 
-## 使用
+浏览器里也能跑 `npm run web` 调界面，此时所有系统能力降级为不可用、凭据走 vite 的 dev-only 端点。
+这条路径只是为了保留调试手段，不是产品形态。
 
-输入后 Enter 发送，Shift+Enter 换行。生成过程中可以直接发送新消息或点击建议，立即打断旧回复；也可以单独点击停止。已收到的部分文字和已执行的工具保留在后续上下文中，不回滚浇水等动作。失败后重试是继续解释，不重新执行上一次点击。顶部选择演示或真实模型。垃圾桶清空聊天和房间，侧栏按钮可收起聊天。
+## 用法
 
-可以拖动角色改变页面内位置，舞台右上角重置位置。轻点头顶、脸颊、徽章或手会收到不同回应，透明区域不会误触。设置支持减少动态效果和关闭嘴型。
+启动后她出现在屏幕右下角。**透明区域的点击会穿透到下层应用**，只有她身上能点、能拖。
 
-房间里的台灯、盆栽、发现卡和沙漏都可以点击，模型也可通过受限工具操作它们。发现卡支持猜答案；输入框上方始终有无需打字的建议。开启「自主探索」后，Step酱会在空闲时自己选小目标，每次最多 6 步；输入、生成中和后台页面暂停新一轮调度。默认关闭，可随时停下。
+- **说话**：直接开口。她说到一半时你开口，她会立刻停下（服务端 VAD + `response.cancel`）。
+- **⌥Space**：唤起输入框，也可以打字。
+- **摸她**：头顶、脸颊、徽章、手各有不同反应。
+- **菜单栏图标**：语音开关、音色、三个感知开关、大小、开机自启、设置、退出。
+- **拖文件给她**：她会看文件名做反应（只读文件名，不读内容）。
 
-聊天和房间仅保留在浏览器及服务端内存中；刷新建立新会话，关闭/清空时请求删除，失联会话闲置一小时后由后续请求清理。没有长期记忆、其他窗口读取或系统悬浮。沙漏是页面内倒计时，页面关闭后不会发系统提醒。
+## 她能感知什么
 
-开发模式修改服务端文件会触发重启，旧内存会话随之丢失。前端收到 HTTP 410 后会自动新建会话、重置房间和上下文，并至多继续一次当前输入；旧卡片答案和倒计时事件不会重放。页面会提示重连，不需要手动点击清空。普通断流不会自动重发，避免重复执行工具。
+三项感知**默认全部关闭**，在菜单栏或设置窗口里开。关闭时她会明确说「你得先打开那个开关」，
+而不是假装看不见：
+
+| 能力 | 开启后 | 边界 |
+|---|---|---|
+| 看屏幕 | 截一张当前屏幕交给 `step-1o-turbo-vision`，聊你正在做的事 | 需系统「屏幕与系统录制」权限；每次都有可见提示；只在内存中处理，用完即删，**不落盘** |
+| 知道前台应用 | 切换应用时她偶尔搭话 | 只读应用名和 bundle id，**不读窗口标题**（那需要辅助功能权限，没申请）；8 秒冷却 + 每分钟 4 次上限 |
+| 读剪贴板 | 她需要时读一次文字 | 每次都有提示；不主动轮询；最多 4000 字 |
+| 自己行动 | 空闲时换位置、久了打瞌睡 | 不读取任何内容 |
+
+**不保存聊天内容、不保存录音、不保存截图。** 只持久化开关、音色、大小、热键。
+详见 [AGENTS.md](AGENTS.md) 的隐私条款 —— 原来那条「不读取其他窗口」的一刀切禁令本轮被显式改成了
+上面这组条件，不是悄悄越过的。
 
 ## 语音
 
-真实模式的输入区提供「声音开/关」「按住说话」「试听」。默认关闭自动朗读；点击声音开关后，新回复按短句生成并播放。按住说话（或聚焦后按住空格/Enter）时才申请麦克风；松开后转写到输入框，可修改后发送。录音最多 30 秒，Escape 取消。首次允许麦克风后若已松开，重新按住录音即可。
+模型 `stepaudio-3-realtime-preview`，一条 WebSocket 承载整个对话回路（听、想、说、调工具），
+不再是「ASR → 对话 → 按句 TTS」的串行链路。
 
-TTS 使用 `stepaudio-3-tts`，默认音色 `livelybreezy-female`（活力轻快），保留自然亲近的底音，微调为清脆、轻盈、有童真的聊天语气，音调略高、停顿自然、不拉长尾音。服务端 `.env` 可用 `STEPFUN_TTS_VOICE` 换底音；不需要克隆音色。ASR 使用 `stepaudio-3-asr-max`，对话与工具仍由 `step-3.7-flash` 负责。二者使用已有的服务端 `STEPFUN_API_KEY`。
+实测延迟：**说完到首帧音频 235 ms**（最快一次 7 ms）。旧版按句合成，句间要等。
 
-新交互、录音、停止、清空和切换模式会取消语音请求并清空播放队列。识别过程中输入新草稿会丢弃迟到的转写。实际播放音量只驱动 neutral 表情的嘴型。录音与合成音频在内存中处理，不由应用写入文件；录音会经后端提交 StepFun 识别。演示模式禁用语音服务，不消耗语音额度。
+音色可选元气少女 / 机灵少女 / 软萌女声 / 邻家妹妹 / 活力轻快，默认元气少女。
+**换音色会重建会话** —— 模型首次出音后 `voice` 不可改。单会话上限 30 分钟，到期自动静默重建。
 
-当前采用按句 HTTP TTS 与按住说话 ASR，不是连续全双工 Realtime；合成句子之间可能有等待。桌面 Edge 已验证，真机触屏/真人录音质量仍待体验。详见 [语音接入记录](docs/AUDIO_INTEGRATION.md)。
+三个实测结论，记在这里免得以后重新踩：
 
-试试「现在几点了？」或「为 https://example.com 准备链接」。链接只会在你点击后打开，界面显示目标地址。模型文本使用禁用原始 HTML 的 Markdown 渲染，链接再次校验 HTTPS。
+- **浏览器设不了 `Authorization` 头**，所以 webview 直连 realtime 必须用 subprotocol 带 key：
+  `['realtime', 'openai-insecure-api-key.<KEY>']`。query param 形式会被拒。
+- **她会声称做了没真做的事。** 规划阶段只在文本输入下观察到，实测语音输入下同样会：
+  说「挪到右下角去」她回「好的我这就挪」但一个工具都没调。现在两条路径都有 `tool_choice` 收紧，
+  且宁可降级成「我做不到」也不让她撒谎。
+- **`response.cancel` 有尾巴。** 取消后还会到 4 个音频分片，不拦就会在被打断后又蹦出半个字。
+  现在有抑制闸门，到下一个 `response.created` 才打开。
 
-模型速度、token 与费用的实测对比，以及 StepAudio 3 接入建议，见 [模型与语音调研](docs/MODELS_AND_AUDIO.md)。Flash 在当前样本中更快、更便宜，但工具后空回复与自主工具超限更多；没有宣称是等价替换。
+PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报的 `audio_end_ms` 在两种缓冲长度下的
+**斜率**以抵消 VAD 偏移；单点读数不可用，而「时长对比文本长度」这种启发式会给出错误答案
+（同一音色同一文本的语速能差 2 倍）。
 
-## 验证与演示
+## 美术
 
-```powershell
-npm.cmd run validate-assets
-npm.cmd run typecheck
-npm.cmd test
-npm.cmd run build
-# 开发服务运行时，使用本机 Edge 做浏览器测试
-node scripts/browser-qa.mjs
-node scripts/markdown-qa.mjs
-node scripts/interaction-qa.mjs
-node scripts/audio-qa.mjs
-node scripts/session-recovery-qa.mjs
-# 会使用真实 TTS / ASR 额度，生成新的试听文件及合成麦克风测试样本
-npx.cmd tsx scripts/audio-live.ts
-# 先运行 audio-live；用生成样本模拟浏览器麦克风，并调用真实 ASR / Flash / TTS
-node scripts/audio-browser-live.mjs
-# 会使用真实 API 额度：房间工具、打断与上下文、自主观察
-node scripts/interaction-live.mjs
-# 两个模型各 15 个回合，使用实际 API 额度
-npx.cmd tsx scripts/model-benchmark.ts
-# 初版兼容端点的检查仍保留
-node scripts/live-smoke.mjs
-# 已构建时，独立启动临时生产服务并验证（也调用一次真实模型）
-node scripts/production-check.mjs
-```
+角色是 Q 版重绘，保留原立绘的全部识别特征（呆毛、浅蓝长发、水手服配青绿领、青绿百褶裙、step 徽章）。
+原始素材 `assets/blue_pet_assets_v0_2/` 保留未改。
 
-推荐演示：切到演示模式 → 关灯/浇水 → 她说到一半时点「简短一点」 → 抽发现卡并猜答案 → 点点角色的四个部位 → 试试 10 秒沙漏 → 清空后开启自主探索，观察她自行浇水 → 切回真实模型自由交流。实验室按钮不调用模型，故障场景按钮仅在演示模式可用。
+流水线在 `tools/art/`，prompt 的唯一来源是 `character.py`：
 
-本次交互迭代的运行结果、调度规则和实现说明见 [交互增强记录](docs/INTERACTION_V2.md)。初版结果保留在 [验证记录](docs/VALIDATION.md)，初版设计调整见 [实现决策](docs/IMPLEMENTATION_NOTES.md)。截图与本次真实调用结果保存在被 Git 忽略的 `artifacts/`；测试脚本可以重新生成证据。
+1. `/images/generations` + `background=transparent` 出 Q 版候选，筛选后定为 `master.png`
+   —— 筛选是把候选缩到 220 px 放在浅色和深色底上比，因为那才是真实显示条件；
+   同样条件下 `high` 相对 `medium` 看不出差别，所以变体一律用 `medium`
+2. 从 master 出发用 `/images/edits` 派生所有变体 —— **edits 会忽略 `background=transparent`**，
+   所以走「纯品红幕布 + 本地抠色」（实测晕边 0.35%）
+3. 每个变体与 master 做像素 diff，变化区域紧凑的裁成配准覆盖层，不紧凑的降级为整图交叉淡入
+4. 归一化、阈值化 alpha（模型给的主体 alpha 上限只到 253–254）、降采样到 512 px，写 `rig.json`
+
+**分层是算出来的，不是声称的。** 原 manifest 当初禁止脸部合成，就是因为没人验证过配准。
+现在 11 个表情里 8 个真分层，3 个（害羞 / 生气 / 难过）因为要画腮红、怒气符号、眼泪而降级为
+整脸图交叉淡入；10 个动作里 9 个有独立姿势，`tilt` 三版 prompt 都没能让模型真的歪头，
+于是改成渲染器对整身图做程序化旋转 —— 头身比 40% 的 Q 版，整体倾斜在视觉上就读作歪头。
+每一条降级都带原因写在 `rig.json` 的 `degraded` 里，**没有任何动作是静默空转的**。
+
+动画是程序化的，不靠堆逐帧素材：呼吸、随机眨眼（带偶发连眨）、摇摆、拖拽时的挤压拉伸与惯性、
+落地回弹、表情 150 ms 交叉淡入、口型由播放音频的 RMS 驱动（不是按文字节奏瞎摆）。
+
+视觉 QA 拼版：`assets/stepchan_q_v1/_qa_220.png`（全身，浅底 / 深底 / 棋盘格）
+与 `_qa_faces.png`（脸部特写）。
 
 ## 代码地图
 
-- `apps/web/src/App.tsx`：聊天、设置、工具卡片和实验室。
-- `apps/web/src/pet/`：Pixi 渲染器、状态控制器、生命周期和拖动。
-- `apps/web/src/agent/`：POST SSE、内存会话、取消、截止时间、旧请求过滤。
-- `apps/web/src/room/`：可点击物件、发现卡、常驻建议。
-- `apps/web/src/audio/` / `apps/web/public/audio-recorder.js`：短句播放、音量嘴型、按住录音、识别取消。
-- `apps/server/src/audioRoutes.ts`：服务端 TTS / ASR 接口、固定音色指令、WAV 校验和超时。
-- `apps/server/src/sessions.ts` / `interactionRuntime.ts`：服务端上下文、打断记录与受限工具循环。
-- `shared/room.ts`：结构化交互事件、房间状态与建议规则。
-- `apps/server/src/`：Fastify 路由、Mock/OpenRouter、工具校验、有限回合运行时。
-- `shared/`：Zod 请求/事件协议与 UTF-8 SSE 解析。
-- `tests/`：协议、异常、工具、控制器、Provider 适配和 HTTP 测试。
-- `scripts/prepare-assets.mjs`：保留原图的 512px 派生流程；安装时自动生成。
-- `docs/StepChan_Character_Bible_v1.md`：保留的人设原文。
+```
+apps/desktop/src-tauri/      Rust：窗口 / 托盘 / 热键 / 系统能力 / key 保管
+  window.rs                  透明置顶窗口、全屏共存、位移补间
+  hittest.rs                 光标轮询驱动的点击穿透（为什么必须在 Rust 侧，见文件头）
+  tray.rs                    菜单栏菜单与全局热键
+  os/                        截屏、前台应用、电量、剪贴板
+apps/web/src/
+  App.tsx                    唯一的集成层：把下面三块缝起来
+  brain/                     人设、工具执行、会话编排
+  voice/                     realtime 客户端、麦克风与播放 worklet、打断
+  pet/                       Pixi 骨架渲染器与程序化动画
+  awareness/                 主动感知：前台应用搭话、拖放反应、空闲行动
+  platform/                  Desktop 契约的两套实现（Tauri / 浏览器）
+  ui/                        气泡、设置窗
+shared/                      冻结契约：realtime / pet / desktop / brain
+tools/art/                   素材生成流水线
+```
 
-主要锁定版本：React 19.3.0、Vite 7.3.7、TypeScript 5.9.3、PixiJS 8.22.0、Fastify 5.12.5、Zod 4.6.7、Sharp 0.35.5。完整精确版本以 `package-lock.json` 为准。
+三块业务层（`brain` / `pet` / `awareness`）互相不 import，耦合只落在 `App.tsx`。
+系统能力一律走 `shared/desktop.ts` 的 `Desktop` 契约 —— 这也是将来移植 Android 的接缝。
 
-## 素材与范围
+## 检查
 
-原件位于 `assets/blue_pet_assets_v0_2/`，1254×1254，未经修改。运行版为完整透明画布 512×512，9 张 PNG 共约 1.15 MB，比原图小 76.2%。派生 manifest 记录缩放和 SHA-256；没有裁图或虚构的配准修复。
+```bash
+npm test                 # 147 个用例
+npm run typecheck
+npm run build:web
+npm run build:debug      # 语音/权限只能在这个产物上验
+cd apps/desktop/src-tauri && cargo check
 
-六张全身表情互斥切换。嘴型只叠在 neutral 上，已检查 250/350/500px 与浅色/深色/棋盘格背景。其它表情停嘴，取消/错误/600ms 文本停顿也停嘴。无眨眼、挥手、独立头部或呆毛动画素材。
+node scripts/realtime-probe.mjs   # 会用真实 API 额度：鉴权、VAD、工具调用、打断
+```
 
-`START_HERE.md`、技术设计、原验收清单和 `sources/` 保留为设计来源；当前事实以本 README 与验证记录为准。`DELIVERY_MANIFEST.json` 是启动包历史快照，不是当前应用清单。
+素材接口的真实行为（透明背景、分辨率下限、400 重试、`edits` 的坑）记在
+`~/Desktop/gpt-image-lab/docs/findings.md`，本项目发现的结论都已回填进去。
+
+设计来源 `docs/StepChan_Character_Bible_v1.md`（人设，仍然有效）、
+`docs/StepChan_Technical_Design_v0_3.md` 与 `sources/`（Web MVP 时期的方案，已被本版取代，
+保留作历史）。`DELIVERY_MANIFEST.json` 是启动包的历史快照，不是当前清单。

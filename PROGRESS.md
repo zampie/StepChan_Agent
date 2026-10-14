@@ -1,32 +1,104 @@
 # Step酱当前进度
 
-更新时间：2026-10-14（Asia/Shanghai）。此文件记录实际实现状态；原设计与素材文件保留。
+更新时间：2026-10-14（Asia/Shanghai）。本文件记录**实际**实现状态与验证证据。
+没真跑过的一律标为未验证 —— 需要 GUI、麦克风或系统权限的部分大多属于这一类。
 
-## 已完成
+## 本轮做了什么
 
-- Web MVP：React / TypeScript / Vite / PixiJS 8 + Fastify，512px 派生素材，6 种互斥全身表情、neutral 嘴型，流式对话、Mock、角色实验室。
-- 小房间交互：台灯、盆栽、发现卡、沙漏；工具执行反馈、常驻建议、4 个部位点击、受限自主探索（默认关闭）、会话上下文与中途打断。
-- 官方 StepFun Provider，默认 `step-3.7-flash`，保留 Step 5 / OpenRouter 切换配置。已实测两模型，Flash 更快/便宜，但当前样本没有节省 token，工具回合成功率也较低。
-- Audio 3 TTS + ASR：`livelybreezy-female`（活力轻快）底音与童真语气；声音开关、试听、按住录音、可编辑转写、短句朗读、播放打断、音量嘴型、迟到结果隔离。用户反馈 `qingchunshaonv` 反而更成熟，已换回原底音并微调清脆度、轻快节奏与自然停顿。
-- 修复开发重启导致反复「会话已过期」：执行前 410 自动重连一次并提示重置，旧卡片/倒计时操作不会重放，普通断流不自动重试。
+把浏览器标签页里的 Web MVP 重做成 macOS 桌面宠物：
 
-## 验证与复现
+- **形态**：Tauri 2 透明无边框置顶窗口 + 菜单栏配置。Node/Fastify 服务端、SSE、会话恢复、
+  「小房间」全部删除；大脑搬进 webview，产物是单个 `.app`，不内嵌 Node 运行时。
+- **语音**：`stepaudio-3-realtime-preview` 一条 WebSocket 承载听/想/说/调工具，
+  替掉「ASR → 对话 → 按句 TTS」串行链路。实测说完到首帧音频 **235 ms**（最快 7 ms）。
+- **美术**：Q 版重绘，保留原角色全部识别特征。分层骨架由像素 diff 算出配准，
+  配不准的显式降级；动画程序化（呼吸/眨眼/摇摆/挤压拉伸/交叉淡入/音频驱动口型）。
+- **第四面墙**：看屏幕吐槽、前台应用搭话、拖放反应、空闲自主行动。三项感知默认关闭。
+- **隐私规则**：`AGENTS.md` 原有的「不读取其他窗口」一刀切禁令被显式改为可控条件
+  （默认关 / 关闭时明确拒绝 / 每次读取有可见提示 / 不落盘 / 只持久化设置）。
 
-- 单元/HTTP 回归：34/34；类型检查和前后端构建通过。
-- Edge：小房间交互回归；音频功能、取消/迟到/麦克风拒绝及资源释放、桌面/移动布局；会话丢失恢复。
-- 生产构建复验：临时 3002 服务跑完交互与音频浏览器检查、真实 Flash 回复、素材缺失回退；19 个公开文件无密钥，浏览器不直接请求供应商。保留既有 Pixi chunk 大小与 Zod 注释警告。
-- 真实调用：新音色合成与 ASR 回传；浏览器合成麦克风 → 真实 ASR → Flash → TTS 播放并停止。没有录制真人测试，也不把机器合成音回传识别当成真人准确率。
-- 详见 [语音接入记录](docs/AUDIO_INTEGRATION.md)、[交互增强记录](docs/INTERACTION_V2.md)、[模型基准与音频调研](docs/MODELS_AND_AUDIO.md)。测试命令在 README。
+## 已验证
 
-## 已知限制与建议下一步
+### 自动化
+- `npm test`：**147/147 通过**（realtime 37、brain 52、awareness 21、rig + art + motion 余下）
+- `npm run typecheck`：通过
+- `cargo check`：通过，**无 warning**
+- `npm run build:web`：通过（pixi chunk 579 KB 的体积告警是既有现象）
+- `npm run build:debug`：**通过**，产出 `Step酱.app`（47.5 MiB）与 `Step酱_2.0.0_aarch64.dmg`（16.5 MiB）
 
-1. 优先改进 Flash 工具后空回复、工具预算用尽时的收尾，保持已执行效果，不通过盲目重试重复动作。
-2. 当前语音为按住说话、按句朗读；如需边听边说和自然抢话，再接 Audio 3 Realtime。现阶段没有自动 VAD 或纯语音的已听上下文管理。
-3. 音色已按要求修改，可用「试听」继续调节；真人麦克风、噪音和触屏真机质量尚待用户体验。
-4. 后端重启会丢失内存中的聊天/房间，自动重连会明确提示重置。尚无持久化记忆、桌面系统悬浮、其他窗口读取、真实独立眨眼或肢体素材。
+### 打包产物的权限前置条件（逐条验过，不是假定）
+- `Info.plist` 内含 `NSMicrophoneUsageDescription`、`LSUIElement=true`、
+  `CFBundleIdentifier=com.stepfun.stepchan.pet`、`LSMinimumSystemVersion=13.0`
+- `codesign -d --entitlements -` 确认 `com.apple.security.device.microphone` 与
+  `.audio-input` **已嵌入**，签名 `adhoc` + `runtime`（hardened）标志
+- ⚠️ 这一条差点漏掉：不显式设 `signingIdentity: "-"` 时 Tauri 会跳过 entitlements，
+  产物只有 Info.plist 而没有 entitlements —— 麦克风三件套只齐了两件。已修。
+
+### 真实 API 调用
+- realtime：subprotocol 鉴权、`session.update`（嵌套工具格式 + server VAD +
+  `stepaudio-3-asr-max` 转写）、用户语音实时字幕、VAD start/stop/committed、流式音频输出、
+  工具调用往返、`response.cancel` 行为。20 种事件类型抓进 `tests/fixtures/realtime-events.json`，
+  全部通过 `parseServerEvent` 且无一降级为 `unknown`
+- 采样率 **24000**：用服务端 `audio_end_ms` 在 48000 / 120000 样本两档的斜率测得
+  25000 Hz 实测值，VAD 的 320 ms 上报栅格正好解释与 24000 的 120 ms 差；
+  对 16000 假设则偏移反号且跨档漂移 1620 ms，排除。输出侧自相关周期 70 样本
+  对照已知 24 kHz 参考的 64 样本，同样排除 16 kHz
+- 图像生成：8 次 `generations`（Q 版候选）+ 约 40 次 `edits`（变体）
+- 系统能力实测值：前台应用 `Ghostty / com.mitchellh.ghostty`；电量 100% full；
+  `macOS 26.6.2 (25G83)`；1×1 录屏探针 granted、1125 字节
+
+### 素材
+- `rig.json` 通过 `rigManifestSchema` 校验，每个素材的 sha256 与尺寸都在清单里
+- 11 表情：8 个真分层，3 个（shy / angry / sad）降级为整脸交叉淡入，原因已记录
+- 10 动作：9 个有独立姿势；`tilt` 改为渲染器程序化旋转，原因已记录
+- 7 个特效；运行期画布 512×512
+- 视觉 QA 拼版 `_qa_220.png` / `_qa_faces.png` 已人工看过：分层合成配准正确，
+  棋盘格那一行无晕边
+
+## 未验证（需要 GUI / 麦克风 / 系统权限，这里没有条件跑）
+
+**全部属于「代码写了、逻辑有单测、但没在真实运行环境里见过」：**
+
+1. 窗口外观与行为：透明、无边框、置顶、**全屏应用之上是否真的可见**、多 Space
+2. 点击穿透的手感：透明区是否真穿透、边缘快速划过是否抖动、拖动是否顺手、混合 DPI 多屏
+3. 麦克风：授权弹窗是否只弹一次、真人录音质量、`AudioContext` 实际采样率是否真是 24000
+   （WKWebView 可能静默 clamp；代码里有重采样兜底，但兜底路径本身没在真 webview 上跑过）
+4. 实际听感：扬声器输出、被打断时的主观延迟
+5. 托盘菜单渲染与各项勾选、⌥Space、拖放落点
+6. 录屏权限**被拒**的分支（本机已授权，无法撤销来测）；1×1 探针在未授权时**是否会弹窗**
+   —— 如果会弹，`screen_permission_status` 就不能在启动时投机调用
+7. `glance_screen` 的视觉模型往返（需要真实录屏授权链路）
+8. `set_timer` 的系统通知真的弹出
+9. realtime 会话 30 分钟到期后的静默重建（没坐等那么久）
+10. `response.thinking.delta` 从未在任何探针里出现过 —— 处理代码在，但事件本身没观察到，
+    由它驱动的「思考」表情属于未确认
+11. Pixi 渲染器的运行时表现（动画手感、交叉淡入、口型跟随）
+
+人工验收清单在 [docs/DESKTOP_QA.md](docs/DESKTOP_QA.md)，按那个跑完请把结果（**包括没通过的项**）写回本文件。
+
+## 已知限制与下一步
+
+1. **演示前要固定二进制。** TCC 授权绑定代码签名，ad-hoc 签名重建后身份会变，
+   麦克风和录屏授权会重新弹、旧授权失效。正确顺序：构建最后一版 → 在那个产物上授权 → 不再重编。
+2. **截屏体积**：缩到最长边 2048（base64 约 2.35 MB）。选 2048 而不是 1600 是因为
+   「看看这段代码」是明确场景，2560 逻辑点的桌面压到 1600 时文字只有 0.625×。
+   如果只需要「她知道我在干什么」，调回 1600 能省一半 body。
+3. **多显示器**：截屏固定取主显示器（`screencapture -m`）。她待在副屏时看到的仍是主屏。
+4. **`screencapture` 失败时退出码仍是 0**，错误只写 stderr —— 判据是「产物文件存在且非空」
+   加 stderr 分类，不能用退出码。这点和最初的假设相反。
+5. 没有长期记忆：聊天、录音、截图都不落盘，重启即忘。这是刻意的（见 AGENTS.md）。
+6. Android 移植只预留了接缝（`Desktop` 契约 + 按 target 分组的依赖 + 分平台 capabilities），
+   **没有做过任何 Android 构建**。
 
 ## 开发交接
 
-运行 `npm.cmd run dev`，浏览器 `http://127.0.0.1:5173`；生产模式 `npm.cmd run build` 后 `npm.cmd start`，地址 `http://127.0.0.1:3001`。密钥仅存于本地被忽略的 `.env`，新机器参考 `.env.example`。原始图、人设与技术设计不覆盖；应用不持久化聊天或录音。
+```bash
+npm install && npm run dev          # 开发
+npm run build:debug                 # 验收语音/权限必须用这个产物
+npm test && npm run typecheck
+```
 
-本轮提交涵盖此前未提交的交互 V2、Provider/模型切换与调研，以及本次语音接入、会话恢复和验证脚本。提交与远端结果以 Git 历史为准，不在此文件猜测尚未生成的 commit ID。
+key 只存本地被忽略的 `.env`（或 `~/.stepchan/.env`），新机器参考 `.env.example`。
+素材重新生成走 `tools/art/`，需要 `~/Desktop/gpt-image-lab` 的 models-proxy key。
+
+原始素材、人设原文与历史设计文档均保留未改。提交以 Git 历史为准，本文件不猜测尚未产生的 commit。
