@@ -24,7 +24,7 @@
 - `npm run typecheck`：通过
 - `cargo check`：通过，**无 warning**
 - `npm run build:web`：通过（pixi chunk 579 KB 的体积告警是既有现象）
-- `npm run build:debug`：**通过**，产出 `Step酱.app`（47.5 MiB）与 `Step酱_2.0.0_aarch64.dmg`（16.5 MiB）
+- `npm run build:debug`：**通过**，产出 `Step酱.app`（46.8 MiB）与 `Step酱_2.0.0_aarch64.dmg`（15.8 MiB）
 
 ### 打包产物的权限前置条件（逐条验过，不是假定）
 - `Info.plist` 内含 `NSMicrophoneUsageDescription`、`LSUIElement=true`、
