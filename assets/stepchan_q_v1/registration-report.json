@@ -507,45 +507,45 @@
       "max": 255
     },
     "fx.sparkle": {
-      "transparent": 69.57,
-      "opaque": 24.69,
-      "edge": 5.74,
+      "transparent": 71.62,
+      "opaque": 26.64,
+      "edge": 1.73,
       "max": 255
     },
     "fx.sweat": {
-      "transparent": 65.32,
-      "opaque": 31.68,
-      "edge": 2.99,
+      "transparent": 66.41,
+      "opaque": 32.72,
+      "edge": 0.87,
       "max": 255
     },
     "fx.zzz": {
-      "transparent": 65.07,
-      "opaque": 29.0,
-      "edge": 5.94,
+      "transparent": 67.11,
+      "opaque": 31.05,
+      "edge": 1.84,
       "max": 255
     },
     "fx.heart": {
-      "transparent": 47.02,
-      "opaque": 49.65,
-      "edge": 3.33,
+      "transparent": 48.17,
+      "opaque": 50.81,
+      "edge": 1.02,
       "max": 255
     },
     "fx.exclaim": {
-      "transparent": 77.34,
-      "opaque": 19.69,
-      "edge": 2.98,
+      "transparent": 78.33,
+      "opaque": 20.7,
+      "edge": 0.96,
       "max": 255
     },
     "fx.question": {
-      "transparent": 73.05,
-      "opaque": 23.05,
-      "edge": 3.9,
+      "transparent": 74.41,
+      "opaque": 24.38,
+      "edge": 1.21,
       "max": 255
     },
     "fx.note": {
-      "transparent": 74.78,
-      "opaque": 21.54,
-      "edge": 3.68,
+      "transparent": 76.06,
+      "opaque": 22.78,
+      "edge": 1.16,
       "max": 255
     }
   },

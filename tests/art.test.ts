@@ -209,10 +209,16 @@ test('degraded 的每条都有名字和非空原因', () => {
 });
 
 test('运行时素材已同步到 vite 的 public 目录', () => {
-  const pub = path.join(root, 'apps/web/public/assets/stepchan_q_v1');
-  assert.ok(existsSync(path.join(pub, 'rig.json')), 'public 下缺 rig.json —— 跑一次 npm run rig');
+  // 同步点只有一个：scripts/sync-rig.mjs → apps/web/public/rig/，挂在 predev/prebuild 上。
+  // 流水线本身不再复制一份 —— 两处都写会在 public/ 下留两份 3MB 素材，
+  // 都被 vite 打进 dist，而只有一份会被加载。App.tsx 读的是 `${BASE_URL}rig/rig.json`。
+  const pub = path.join(root, 'apps/web/public/rig');
+  assert.ok(
+    existsSync(path.join(pub, 'rig.json')),
+    'public/rig 下缺 rig.json —— 跑一次 npm run sync-rig',
+  );
   for (const a of allAssets())
-    assert.ok(existsSync(path.join(pub, a.file)), `public 下缺 ${a.file}`);
+    assert.ok(existsSync(path.join(pub, a.file)), `public/rig 下缺 ${a.file}`);
 });
 
 /** 只读 PNG 的 IHDR，不引图像库 —— 测试不该依赖 sharp 这种可选依赖。 */

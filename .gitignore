@@ -6,6 +6,8 @@ dist/
 apps/web/public/assets/derived/
 # scripts/sync-rig.mjs 从 assets/stepchan_q_v1/ 复制过来的运行期副本，不是源。
 apps/web/public/rig/
+# tools/art 的流水线也会往这里放一份运行期副本；源只有仓库根的 assets/stepchan_q_v1/。
+apps/web/public/assets/stepchan_q_v1/
 artifacts/
 *.log
 

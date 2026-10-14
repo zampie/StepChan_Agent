@@ -134,7 +134,7 @@ tools/art/                   素材生成流水线
 ## 检查
 
 ```bash
-npm test                 # 147 个用例
+npm test                 # 151 个用例
 npm run typecheck
 npm run build:web
 npm run build:debug      # 语音/权限只能在这个产物上验

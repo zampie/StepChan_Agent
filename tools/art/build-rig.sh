@@ -3,7 +3,7 @@
 #
 # 三步，每一步都可单独重跑：
 #   1. gen_variants.py  调接口生成变体（断点续跑：已存在的文件会跳过）
-#   2. register.py      抠像 + 像素 diff 配准 + 写 rig.json + 同步到 public/
+#   2. register.py      抠像 + 像素 diff 配准 + 写 rig.json（运行期副本由 npm run sync-rig 负责）
 #   3. qa_sheet.py      生成人眼复核用的 QA 图
 #
 # 用法:

@@ -20,7 +20,7 @@
 ## 已验证
 
 ### 自动化
-- `npm test`：**147/147 通过**（realtime 37、brain 52、awareness 21、rig + art + motion 余下）
+- `npm test`：**151/151 通过**（realtime 37、brain 52、awareness 21、rig + art + motion 41）
 - `npm run typecheck`：通过
 - `cargo check`：通过，**无 warning**
 - `npm run build:web`：通过（pixi chunk 579 KB 的体积告警是既有现象）

@@ -20,7 +20,14 @@ const dest = join(root, 'apps/web/public/rig');
 // 这些只是生成过程的留痕，不该进构建产物：
 // candidates 是筛选 master 时的候选，raw 是抠色/归一化前的 1024px 原图，
 // registration-report.json 是 diff 配准的量化记录，_ 开头的是视觉 QA 拼版（几 MB）。
-const EXCLUDE = new Set(['candidates', 'raw', '__pycache__', 'registration-report.json']);
+// master.png 也不要 —— rig.json 里的 base 指向 rig/base.png，master 只是派生源头的留痕。
+const EXCLUDE = new Set([
+  'candidates',
+  'raw',
+  '__pycache__',
+  'registration-report.json',
+  'master.png',
+]);
 const skip = (name) => EXCLUDE.has(name) || name.startsWith('.') || name.startsWith('_');
 
 if (!existsSync(src)) {

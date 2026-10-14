@@ -44,7 +44,6 @@ ASSETS = ROOT / "assets" / "stepchan_q_v1"
 RAW = ASSETS / "raw"
 RIG_DIR = ASSETS / "rig"
 MASTER = ASSETS / "master.png"
-PUBLIC = ROOT / "apps" / "web" / "public" / "assets" / "stepchan_q_v1"
 
 CANVAS = 1024
 # 运行时尺寸。桌宠显示 200–400 px，默认 280；512 在默认档位是 1.8× 超采样，
@@ -373,7 +372,9 @@ def save_overlay(over: Image.Image, bbox: tuple[int, int, int, int], path: Path)
     crop = over.crop((x1, y1, x2, y2))
     w = max(1, round(crop.width * SCALE))
     h = max(1, round(crop.height * SCALE))
-    crop.resize((w, h), Image.LANCZOS).save(path)
+    # clean_alpha 必须在缩放**之后**再跑一遍：LANCZOS 会在边缘重新造出 a<16 的淡光晕，
+    # 先清后缩等于没清。这个顺序错误是 tests/art.test.ts 的光晕检查抓出来的（2783 个残留像素）。
+    clean_alpha(crop.resize((w, h), Image.LANCZOS)).save(path)
     return {"file": f"rig/{path.name}", "x": round(x1 * SCALE), "y": round(y1 * SCALE), "w": w, "h": h}
 
 
@@ -384,7 +385,8 @@ def save_empty(path: Path) -> dict:
 
 
 def save_full(im: Image.Image, path: Path) -> dict:
-    im.resize((RUNTIME, RUNTIME), Image.LANCZOS).save(path)
+    # 同上：缩放后必须重新阈值化 alpha。
+    clean_alpha(im.resize((RUNTIME, RUNTIME), Image.LANCZOS)).save(path)
     return {"file": f"rig/{path.name}", "w": RUNTIME, "h": RUNTIME}
 
 
@@ -441,7 +443,7 @@ def trim_fx(im: Image.Image) -> Image.Image:
     pad = max(2, int(side * 0.06))
     canvas = Image.new("RGBA", (side + pad * 2, side + pad * 2), (0, 0, 0, 0))
     canvas.paste(im, ((canvas.width - im.width) // 2, (canvas.height - im.height) // 2), im)
-    return canvas.resize((CANVAS // 4, CANVAS // 4), Image.LANCZOS)
+    return clean_alpha(canvas.resize((CANVAS // 4, CANVAS // 4), Image.LANCZOS))
 
 
 def fallback_fx(name: str) -> Image.Image:
@@ -708,12 +710,10 @@ def main() -> int:
     report["layer_modes"] = {k: v["mode"] for k, v in expressions.items()}
     (ASSETS / "registration-report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
 
-    # 同步给 vite 的静态目录（dev 和 build 都从 public 取）。
-    PUBLIC.mkdir(parents=True, exist_ok=True)
-    (PUBLIC / "rig").mkdir(exist_ok=True)
-    for p in RIG_DIR.iterdir():
-        (PUBLIC / "rig" / p.name).write_bytes(p.read_bytes())
-    (PUBLIC / "rig.json").write_bytes((ASSETS / "rig.json").read_bytes())
+    # 运行期副本不在这里做 —— scripts/sync-rig.mjs 是唯一的同步点，
+    # 并且挂在 predev/prebuild 上。两处都复制会在 public/ 下留两份 3MB 的素材，
+    # 都被 vite 打进 dist，而只有一份会被加载。
+    print("rig.json 已写入 assets/stepchan_q_v1/；运行期副本用 `npm run sync-rig`")
 
     n_layers = sum(1 for v in expressions.values() if v["mode"] == "layers")
     print(f"expressions: layers={n_layers} sprite={len(expressions) - n_layers}")
