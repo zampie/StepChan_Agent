@@ -2,20 +2,37 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BlinkScheduler,
+  ShuffleBag,
   Spring,
   VisemeTracker,
   audioVisemeLadder,
   breathe,
+  clawFeel,
+  clawPose,
   crossfadeMs,
   easeInOut,
   fxPose,
+  logoUrlFor,
   minHoldMs,
   resolveBaseUrl,
+  sagTarget,
   silenceFloor,
   squash,
   sway,
+  swingTarget,
+  tapPools,
+  tapTargetOf,
+  tapTargets,
+  type TapReaction,
 } from '../apps/web/src/pet';
-import { type EyeState, type Viseme } from '../shared/pet';
+import {
+  actions,
+  expressions,
+  fxNames,
+  touchParts,
+  type EyeState,
+  type Viseme,
+} from '../shared/pet';
 
 // ---------------------------------------------------------------------------
 // 口型映射。这是整条语音链路里唯一「主观感受」能被量化成单测的地方：
@@ -243,3 +260,209 @@ test('resolveBaseUrl 从清单 URL 推出素材目录', () => {
   assert.equal(resolveBaseUrl('/assets/stepchan_q_v1/rig.json'), '/assets/stepchan_q_v1/');
   assert.equal(resolveBaseUrl('rig.json'), '');
 });
+
+test('logoUrlFor 把 rig.json 换成同目录的 logo.json', () => {
+  assert.equal(logoUrlFor('/rig/rig.json'), '/rig/logo.json');
+  assert.equal(logoUrlFor('rig.json'), 'logo.json');
+});
+
+// ---------------------------------------------------------------------------
+// 抓娃娃机姿态
+//
+// Pixi 渲染器在这个环境里跑不起来（没有 GUI），所以**手感没有被验证过**。
+// 这里能验证的是手感背后的数学：站地时必须完全中性、体积守恒、各项有界、
+// 支点确实会从脚底搬到头顶。这些性质错了，手感一定错；它们对了，手感仍然要人眼看。
+// ---------------------------------------------------------------------------
+
+const REST = { lift: 0, swing: 0, lag: 0, sag: 0, rebound: 0 };
+
+test('没被提起时抓娃娃机姿态完全中性（支点在脚底、无位移无切变无缩放）', () => {
+  const p = clawPose(REST);
+  assert.equal(p.pivotY, 1, '站着的支点必须是锚点（脚底）');
+  assert.equal(p.riseFrac, 0);
+  assert.equal(p.rotation, 0);
+  assert.equal(p.skewX, 0);
+  assert.deepEqual({ x: p.scaleX, y: p.scaleY }, { x: 1, y: 1 });
+});
+
+test('lift 把支点从脚底搬到头顶并抬升身体 —— 这是悬挂感的来源', () => {
+  const up = clawPose({ ...REST, lift: 1 });
+  assert.ok(Math.abs(up.pivotY - clawFeel.liftPivotY) < 1e-9, `支点 ${up.pivotY}`);
+  assert.ok(up.pivotY < 0.2, `支点 ${up.pivotY} 不在画幅上部，旋转会读作「歪了」而不是「吊着」`);
+  assert.ok(up.riseFrac < 0, '被提起时应该整体上移');
+  // 中间状态必须是插值，不能是开关 —— 否则抓起/放下的瞬间会跳一帧。
+  const mid = clawPose({ ...REST, lift: 0.5 });
+  assert.ok(mid.pivotY > up.pivotY && mid.pivotY < 1, `支点没有插值：${mid.pivotY}`);
+});
+
+test('摆角、切变、下垂都乘在 lift 上 —— 放手后自动收回，不需要退出动画', () => {
+  const input = { lift: 0, swing: 0.4, lag: 0, sag: clawFeel.sagMax, rebound: 0 };
+  const grounded = clawPose(input);
+  assert.equal(grounded.rotation, 0, 'lift=0 时不该有悬挂摆角');
+  assert.equal(grounded.skewX, 0, 'lift=0 时不该有切变');
+  assert.deepEqual({ x: grounded.scaleX, y: grounded.scaleY }, { x: 1, y: 1 }, 'lift=0 时不该有下垂');
+  const lifted = clawPose({ ...input, lift: 1 });
+  assert.ok(Math.abs(lifted.rotation) > 0.3);
+  assert.ok(lifted.scaleY > 1 && lifted.scaleX < 1, '下垂必须是竖向拉长、横向收窄');
+});
+
+test('下半身滞后产生切变，切变有界且在同步时归零', () => {
+  const synced = clawPose({ ...REST, lift: 1, swing: 0.3, lag: 0.3 });
+  assert.equal(synced.skewX, 0, '上下身同步时不该有切变');
+  const trailing = clawPose({ ...REST, lift: 1, swing: 0.4, lag: 0 });
+  assert.ok(trailing.skewX > 0, '上身先动时下身应该拖在后面');
+  const extreme = clawPose({ ...REST, lift: 1, swing: 99, lag: -99 });
+  assert.equal(extreme.skewX, clawFeel.lagMax, '切变必须被夹住，否则身体会被撕开');
+});
+
+test('落地回弹是先压扁后拉长（squash 输入为负＝压扁）', () => {
+  const land = clawPose({ ...REST, rebound: -clawFeel.landBounce });
+  assert.ok(land.scaleY < 1 && land.scaleX > 1, '落地第一下必须是压扁');
+  assert.ok(clawFeel.landVelocity > 0, '初速度必须为正，才能从压扁冲过 0 变成拉长');
+});
+
+test('抓娃娃机的缩放永远体积守恒（squash 的性质，不许被绕过）', () => {
+  for (const lift of [0, 0.3, 1]) {
+    for (const sag of [0, 0.05, 0.085]) {
+      for (const rebound of [-0.26, 0, 0.2]) {
+        const p = clawPose({ ...REST, lift, sag, rebound });
+        assert.ok(
+          Math.abs(p.scaleX - 1 + (p.scaleY - 1)) < 1e-12,
+          `lift=${lift} sag=${sag} rebound=${rebound} 不是体积守恒：${p.scaleX} × ${p.scaleY}`,
+        );
+      }
+    }
+  }
+});
+
+test('摆角与下垂的速度映射被夹住，且方向与拖动相反', () => {
+  assert.equal(swingTarget(0), 0);
+  assert.ok(swingTarget(600) < 0, '往右拖时身体应该落在手的左后方');
+  assert.equal(swingTarget(1e9), -clawFeel.swingMax);
+  assert.equal(swingTarget(-1e9), clawFeel.swingMax);
+  // 提着不动也该垂着 —— 只有速度驱动的话静止悬挂就完全没有重量感。
+  assert.ok(sagTarget(0) > 0, '静止悬挂也要有底量下垂');
+  assert.ok(sagTarget(5000) > sagTarget(0), '拽得越快垂得越长');
+  assert.ok(sagTarget(1e9) <= clawFeel.sagMax + 1e-12, '下垂必须被夹住');
+});
+
+// ---------------------------------------------------------------------------
+// 单击反应
+// ---------------------------------------------------------------------------
+
+test('洗牌袋：一轮内每项各出现一次', () => {
+  const bag = new ShuffleBag(['a', 'b', 'c', 'd'], mulberry(7));
+  const round = [bag.next(), bag.next(), bag.next(), bag.next()];
+  assert.deepEqual([...round].sort(), ['a', 'b', 'c', 'd']);
+});
+
+test('洗牌袋：连续两次绝不重复（含跨轮的交界处）', () => {
+  // 交界处是唯一会出错的地方：一轮取完重洗，新一轮的第一张可能正好是上一轮的最后一张。
+  // 所以必须跑足够多轮，并且用多个种子 —— 单个种子可能恰好绕过那个分支。
+  for (let seed = 1; seed <= 24; seed++) {
+    const bag = new ShuffleBag(['a', 'b', 'c'], mulberry(seed));
+    let prev = bag.next();
+    for (let i = 0; i < 600; i++) {
+      const cur = bag.next();
+      assert.notEqual(cur, prev, `种子 ${seed} 第 ${i} 次连续重复：${cur}`);
+      prev = cur;
+    }
+  }
+});
+
+test('洗牌袋：长跑下分布均匀（不是「固定顺序轮转」也不是偏向某一项）', () => {
+  const bag = new ShuffleBag(['a', 'b', 'c', 'd'], mulberry(3));
+  const count = new Map<string, number>();
+  const pairs = new Set<string>();
+  let prev = bag.next();
+  for (let i = 0; i < 4000; i++) {
+    const cur = bag.next();
+    count.set(cur, (count.get(cur) ?? 0) + 1);
+    pairs.add(`${prev}>${cur}`);
+    prev = cur;
+  }
+  for (const [k, n] of count) assert.ok(n > 800 && n < 1200, `${k} 出现 ${n} 次，分布不均`);
+  // 固定顺序轮转只会产生 4 种相邻对；洗牌袋应该覆盖除自反外的 12 种。
+  assert.ok(pairs.size >= 10, `只出现了 ${pairs.size} 种相邻组合，看起来是固定顺序`);
+});
+
+test('洗牌袋：单元素必然重复（显式约定），空袋直接报错', () => {
+  const one = new ShuffleBag(['only']);
+  assert.equal(one.next(), 'only');
+  assert.equal(one.next(), 'only');
+  assert.throws(() => new ShuffleBag([]), /至少一个候选/);
+});
+
+test('每个 TouchPart 以及 skirt / default 都有自己的反应组，且各组 ≥3 条', () => {
+  for (const part of touchParts) {
+    assert.ok(tapPools[part], `缺少 ${part} 的反应组`);
+  }
+  for (const target of tapTargets) {
+    const pool = tapPools[target];
+    assert.ok(pool.length >= 3, `${target} 只有 ${pool.length} 条反应 —— 少于 3 条谈不上「不重复」`);
+    const ids = new Set(pool.map((r) => r.id));
+    assert.equal(ids.size, pool.length, `${target} 的反应 id 有重复`);
+  }
+});
+
+test('反应只引用契约里存在的表情/动作/特效，且每条都至少改变一件事', () => {
+  const ok = {
+    expression: new Set<string>(expressions),
+    action: new Set<string>(actions),
+    fx: new Set<string>(fxNames),
+  };
+  for (const target of tapTargets) {
+    for (const r of tapPools[target]) {
+      if (r.expression) assert.ok(ok.expression.has(r.expression), `${r.id} 的表情不在契约里`);
+      if (r.action) assert.ok(ok.action.has(r.action), `${r.id} 的动作不在契约里`);
+      if (r.fx) assert.ok(ok.fx.has(r.fx), `${r.id} 的特效不在契约里`);
+      const changes: (keyof TapReaction)[] = ['expression', 'action', 'fx', 'blink', 'poke'];
+      assert.ok(
+        changes.some((k) => r[k] !== undefined),
+        `${r.id} 什么都不改 —— 点了没反应比没有这条反应更糟`,
+      );
+      // reduceMotion 下 blink / poke 会被跳过，所以不能有「只靠动效」的反应。
+      assert.ok(
+        r.expression || r.action || r.fx,
+        `${r.id} 只有纯动效，reduceMotion 下点了毫无变化`,
+      );
+    }
+  }
+});
+
+test('tapTargetOf 认得各部位，认不出的一律走 default（包括 null 与 "default" 自身）', () => {
+  assert.equal(tapTargetOf('head'), 'head');
+  assert.equal(tapTargetOf('skirt'), 'skirt');
+  assert.equal(tapTargetOf('badge'), 'badge');
+  assert.equal(tapTargetOf(null), 'default');
+  assert.equal(tapTargetOf(undefined), 'default');
+  assert.equal(tapTargetOf('elbow'), 'default');
+  // 'default' 是内部组名，外部传进来也只应落到 default，不该被当成「某个部位」。
+  assert.equal(tapTargetOf('default'), 'default');
+});
+
+test('摆角上限不会把脚甩出窗口（默认档位下的几何预算）', () => {
+  // 支点在头顶 → 脚底横移 = sin(θ)·(1−liftPivotY)·canvasH·scale。
+  // 默认档位：画布 512、显示高度 300（BASE_SIZE）、窗口宽 420（PET_WIDTH）、角色半宽约 88 px。
+  // 这条断言是为了让「调大 swingMax」这件事必须同时面对窗口宽度，而不是悄悄超出去。
+  const canvasH = 512;
+  const scale = 300 / canvasH;
+  const footShift = Math.sin(clawFeel.swingMax) * (1 - clawFeel.liftPivotY) * canvasH * scale;
+  const budget = 420 / 2 - 88;
+  assert.ok(
+    footShift < budget,
+    `摆到上限时脚底横移 ${footShift.toFixed(0)} px 超过窗口余量 ${budget} px —— 脚会被窗口裁掉`,
+  );
+});
+
+/** 确定性 PRNG（mulberry32）。测试里不能用 Math.random —— 失败必须可复现。 */
+function mulberry(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}

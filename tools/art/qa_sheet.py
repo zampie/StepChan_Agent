@@ -8,18 +8,25 @@
 浅色与深色两种底色都画：浅色看描边与抠像边缘，深色看有没有残留的白雾光晕
 （透明背景产物的 a<16 淡光晕在深色桌面上会显出一圈白边）。
 
+第三张图 `_qa_logo.png` 专门看 StepFun logo 图层：覆盖前后对比（220 px 浅底/深底）、
+徽章特写（6× 放大，看旧徽章有没有从边上露出来）、以及栅格化产物与真 SVG 渲染器的叠合。
+合成同样**从 logo.json 读**，所以它也在验证 placements 里的 cx/cy/size/rotation。
+
 运行：~/Desktop/gpt-image-lab/.venv/bin/python tools/art/qa_sheet.py
 """
 
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+from PIL import Image, ImageChops, ImageDraw, ImageFont  # noqa: E402
+
+from logo import parse_icon, reference_raster, render_icon  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 ASSETS = ROOT / "assets" / "stepchan_q_v1"
@@ -81,6 +88,37 @@ def compose_layer(manifest: dict, slot: str, key: str) -> Image.Image:
     return out
 
 
+LOGO_SS = 4  # 旋转/缩放前的超采样倍数，避免 17 px 的小图被旋转搅成一团
+
+
+def place_logo(canvas: Image.Image, logo: Image.Image, p: dict) -> Image.Image:
+    """按 logo.json 的 placement 把 logo 贴到画布上。
+
+    这是 Python 侧对渲染器的**复刻**：圆心对齐 cx/cy、直径 = size、顺时针 rotation 弧度。
+    Pixi 里 rotation 正方向是顺时针（y 轴向下），Pillow 的 rotate 是逆时针，所以取负。
+    两边对不上的话，这张 QA 图上的 logo 位置就会和运行期不一致 —— 所以单位约定写在这里。
+    """
+    side = max(1, int(round(p["size"])))
+    im = logo.resize((side * LOGO_SS, side * LOGO_SS), Image.LANCZOS)
+    if p.get("rotation"):
+        im = im.rotate(-math.degrees(p["rotation"]), Image.BICUBIC, expand=True)
+    im = im.resize(
+        (max(1, round(im.width / LOGO_SS)), max(1, round(im.height / LOGO_SS))), Image.LANCZOS
+    )
+    canvas.alpha_composite(
+        im, (round(p["cx"] - im.width / 2), round(p["cy"] - im.height / 2))
+    )
+    return canvas
+
+
+def with_logo(manifest: dict, logo_manifest: dict, body: Image.Image) -> Image.Image:
+    out = body.copy()
+    logo = Image.open(ASSETS / logo_manifest["asset"]["file"]).convert("RGBA")
+    for p in logo_manifest["placements"].values():
+        place_logo(out, logo, p)
+    return out
+
+
 def checker(size: tuple[int, int], cell: int = 11) -> Image.Image:
     im = Image.new("RGBA", size, CHECKER[0])
     d = ImageDraw.Draw(im)
@@ -97,11 +135,12 @@ def strip(
     bg,
     title: str,
     tile: int = TILE,
+    min_width: int = 0,
 ) -> Image.Image:
     f = font()
     ft = font(15)
     head = 24
-    w = PAD + len(items) * (tile + PAD)
+    w = max(min_width, PAD + len(items) * (tile + PAD))
     h = head + tile + LABEL_H + PAD
     sheet = checker((w, h)) if bg == "checker" else Image.new("RGBA", (w, h), bg)
     d = ImageDraw.Draw(sheet)
@@ -182,7 +221,116 @@ def main() -> int:
     out2 = ASSETS / "_qa_faces.png"
     close.save(out2)
     print(f"wrote {out2} {close.size}")
+
+    logo_sheet()
     return 0
+
+
+def logo_sheet() -> None:
+    """StepFun logo 图层的专用 QA 图。
+
+    四段，每一段回答一个具体问题：
+    1. 栅格化产物本身对不对 —— 白底 / 深底 / 棋盘，以及和 qlmanage 渲染的同一份 SVG 叠合
+       （红 = 只有我的，绿 = 只有 SVG 渲染器的；只应该剩一圈 1 px 的抗锯齿描边）。
+    2. 220 px 全身，覆盖前 / 覆盖后，浅底与深底 —— 这是真实显示尺寸下的观感。
+    3. 徽章特写 6× 放大，覆盖前 / 覆盖后 —— 看旧徽章有没有从圆盘边上露出来。
+    4. 覆盖后与「圆盘掩膜」的叠合：把 logo 画成纯红，旧徽章的深色像素还露在红圈外面
+       就会显成黑边。这一段是「盖干净了」的像素级证据，不靠肉眼估。
+    """
+    manifest = json.loads((ASSETS / "rig.json").read_text())
+    lm_path = ASSETS / "logo.json"
+    if not lm_path.exists():
+        print("!! 没有 logo.json，跳过 _qa_logo.png（先跑 tools/art/logo.py）")
+        return
+    lm = json.loads(lm_path.read_text())
+    logo = Image.open(ASSETS / lm["asset"]["file"]).convert("RGBA")
+    base = load(manifest, manifest["base"]["file"])
+    after = with_logo(manifest, lm, base)
+
+    # ---- 1. 产物自身 ----
+    icon = parse_icon((ASSETS / lm["source"]["svg"]).read_text())
+    ref = reference_raster(ASSETS / lm["source"]["svg"], 256)
+    overlay = Image.new("RGBA", (256, 256), (255, 255, 255, 255))
+    if ref is not None:
+        mine_m = _ink(render_icon(icon))
+        ref_m = _ink(ref)
+        px = overlay.load()
+        a, b = mine_m.load(), ref_m.load()
+        for y in range(256):
+            for x in range(256):
+                m, r = a[x, y] > 128, b[x, y] > 128
+                if m and r:
+                    px[x, y] = (34, 34, 38, 255)
+                elif m:
+                    px[x, y] = (226, 40, 40, 255)
+                elif r:
+                    px[x, y] = (40, 190, 60, 255)
+    fid = lm["source"].get("fidelity") or {}
+    raster = [
+        ("logo.png", logo),
+        ("on white", _on(logo, (255, 255, 255, 255))),
+        ("on dark", _on(logo, DARK)),
+        (f"vs SVG: IoU {fid.get('iou', '?')}", overlay),
+    ]
+
+    # ---- 2. 220 px 全身 ----
+    full_light = [("before (fake badge)", base), ("after (StepFun logo)", after)]
+
+    # ---- 3/4. 特写 ----
+    closeups: list[tuple[str, Image.Image]] = []
+    proof: list[tuple[str, Image.Image]] = []
+    flat = Image.new("RGBA", logo.size, (226, 40, 40, 255))
+    flat.putalpha(logo.getchannel("A"))
+    for slot, p in lm["placements"].items():
+        r = int(p["size"])
+        box = (int(p["cx"] - r), int(p["cy"] - r), int(p["cx"] + r), int(p["cy"] + r))
+        closeups.append((f"{slot} before", base.crop(box)))
+        closeups.append((f"{slot} after d={p['size']} cover={p['coverRadius']}", after.crop(box)))
+        masked = place_logo(base.copy(), flat, p)
+        proof.append((f"{slot} coverage", masked.crop(box)))
+
+    deep = fid.get("deepMismatchPixels", "?")
+    width = PAD + 4 * (200 + PAD)
+    parts = [
+        strip(
+            {},
+            raster,
+            LIGHT,
+            f"StepFun logo raster 256px — overlay: red=mine only, green=qlmanage only, deep mismatch {deep}px",
+            tile=200,
+            min_width=width,
+        ),
+        strip({}, full_light, LIGHT, "logo overlay / light @220", tile=TILE, min_width=width),
+        strip({}, full_light, DARK, "logo overlay / dark @220", tile=TILE, min_width=width),
+        strip({}, closeups, LIGHT, "badge close-up / light (6x)", tile=200, min_width=width),
+        strip({}, closeups, DARK, "badge close-up / dark (6x)", tile=200, min_width=width),
+        strip(
+            {},
+            proof,
+            LIGHT,
+            "coverage proof — logo painted flat red; any dark outside the red disc is the old badge leaking",
+            tile=200,
+            min_width=width,
+        ),
+    ]
+    sheet = stack(parts)
+    out = ASSETS / "_qa_logo.png"
+    sheet.save(out)
+    print(f"wrote {out} {sheet.size}")
+
+
+def _ink(im: Image.Image) -> Image.Image:
+    """黑墨掩膜（alpha 高且亮度低）。透明像素不算墨，即使 RGB 是黑的。"""
+    im = im.convert("RGBA")
+    a = im.getchannel("A").point(lambda v: 255 if v > 128 else 0)
+    dark = im.convert("L").point(lambda v: 255 if v < 128 else 0)
+    return ImageChops.multiply(a, dark)
+
+
+def _on(im: Image.Image, bg) -> Image.Image:
+    out = Image.new("RGBA", im.size, bg)
+    out.alpha_composite(im)
+    return out
 
 
 if __name__ == "__main__":

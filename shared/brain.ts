@@ -166,4 +166,8 @@ export type PetEvent =
   // 隐私动作的可见提示：看屏幕/读剪贴板时必须冒出来。
   | { type: 'privacy_notice'; action: 'screen' | 'clipboard' | 'frontmost'; reason: string }
   | { type: 'link'; url: string }
+  // 需要告诉用户、但**不是错误**的提示（例如「聪明优先模式现在只支持打字」）。
+  // 和 error 分开是因为 UI 会给 error 配告警样式，把正常的能力说明显示成红色报错
+  // 会让用户以为出故障了。
+  | { type: 'notice'; message: string }
   | { type: 'error'; message: string };

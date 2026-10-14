@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import test, { describe, beforeEach, afterEach } from 'node:test';
 
 import { safeUrl } from '../apps/web/src/brain/url';
+import { Brain } from '../apps/web/src/brain/Brain';
 import { createToolExecutor, type ToolContext } from '../apps/web/src/brain/tools';
 import {
   buildInstructions,
@@ -16,6 +17,7 @@ import {
 import {
   RealtimeSession,
   MAX_TOOL_CALLS_PER_TURN,
+  MIN_PUSH_TO_TALK_FRAMES,
 } from '../apps/web/src/voice/RealtimeSession';
 import { defaultSettings, type Desktop, type Settings } from '../shared/desktop';
 import { toolDefinitions, type PetEvent, type ToolName, type ToolResult } from '../shared/brain';
@@ -532,6 +534,15 @@ function makeSession(
   executed: { name: ToolName; args: unknown }[];
   /** 播放层探针：压音状态可读，她的出声电平可写。 */
   speech: { ducked: boolean; level: number };
+  /** 采集层探针：不碰真麦克风，只记录开关次数，并能按需喂几帧音频。 */
+  mic: {
+    starts: number;
+    stops: number;
+    running: boolean;
+    failWith?: Error;
+    /** 模拟采到了 n 帧音频（走真正的 onFrame 回调）。 */
+    feed: (frames?: number) => void;
+  };
 } {
   const events: PetEvent[] = [];
   const executed: { name: ToolName; args: unknown }[] = [];
@@ -550,6 +561,8 @@ function makeSession(
   let level = 0;
   const raw = session as unknown as {
     speech: { duck: () => void; unduck: () => void };
+    mic: { start: () => Promise<void>; stop: () => void; events: { onFrame: (b: string) => void } };
+    started: boolean;
   };
   Object.defineProperty(raw.speech, 'audioLevel', {
     configurable: true,
@@ -572,7 +585,30 @@ function makeSession(
       level = v;
     },
   };
-  return { session, ws, events, executed, speech };
+
+  // 麦克风同理：按住说话只关心「开了几次、关了几次、送了几帧」。
+  const mic = {
+    starts: 0,
+    stops: 0,
+    running: false,
+    failWith: undefined as Error | undefined,
+    // 一帧 PCM16 的 base64，内容无所谓 —— 会话只数帧数。
+    feed: (frames = MIN_PUSH_TO_TALK_FRAMES) => {
+      for (let i = 0; i < frames; i++) raw.mic.events.onFrame('AAAA');
+    },
+  };
+  raw.mic.start = async () => {
+    mic.starts++;
+    if (mic.failWith) throw mic.failWith;
+    mic.running = true;
+  };
+  raw.mic.stop = () => {
+    mic.stops++;
+    mic.running = false;
+  };
+  // connect() 绕过了 start()，所以 started 没被置上 —— 按住说话会检查它。
+  raw.started = true;
+  return { session, ws, events, executed, speech, mic };
 }
 
 function buildSessionOptions(input: {
@@ -580,12 +616,17 @@ function buildSessionOptions(input: {
   executed: { name: ToolName; args: unknown }[];
   executeTool?: (name: ToolName, args: unknown) => Promise<ToolResult>;
   textNeedsTool?: (text: string) => ToolName | null;
+  listening?: boolean;
+  interruptible?: boolean;
 }) {
   return {
     apiKey: 'sk-fake',
     voice: 'yuanqishaonv',
     instructions: 'test instructions',
     tools: toolDefinitions,
+    // 两个开关在契约里的默认值：持续聆听开、语音打断关。
+    listening: input.listening ?? true,
+    interruptible: input.interruptible ?? false,
     emit: (event: PetEvent) => input.events.push(event),
     textNeedsTool: input.textNeedsTool,
     executeTool:
@@ -803,14 +844,18 @@ describe('RealtimeSession：工具闭环与上限', () => {
   });
 });
 
-describe('RealtimeSession：打断（headline feature）', () => {
+describe('RealtimeSession：打断（headline feature，voiceInterruptible=true）', () => {
   beforeEach(resetWebSocket);
   afterEach(cleanupSessions);
+
+  /** 这一组测的是「可打断」开着时的 duck-then-confirm 行为，所以必须显式打开。 */
+  const interruptible = (extra: Partial<Parameters<typeof buildSessionOptions>[0]> = {}) =>
+    makeSession({ interruptible: true, ...extra });
 
   // 打断是不可逆的（flush + cancel 砍掉的音频回不来），而 VAD 会被咳嗽、键盘声误触发。
   // 所以契约是「先压音量，确认是人声再 cancel」，不是「立刻 cancel」。
   test('speech_started 先压音量，不立刻 cancel', () => {
-    const { ws, events, speech } = makeSession();
+    const { ws, events, speech } = interruptible();
     ws.deliver({ type: 'response.created', response: {} });
     speech.level = 0.5; // 她正在出声
     ws.sent.length = 0;
@@ -824,7 +869,7 @@ describe('RealtimeSession：打断（headline feature）', () => {
   });
 
   test('听到实际转写才真打断', () => {
-    const { ws, speech } = makeSession();
+    const { ws, speech } = interruptible();
     ws.deliver({ type: 'response.created', response: {} });
     speech.level = 0.5;
     ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
@@ -838,7 +883,7 @@ describe('RealtimeSession：打断（headline feature）', () => {
 
   // 这条是本次修复的核心：一声咳嗽不该把她刚说的半句彻底砍掉。
   test('噪声误触发（无转写就结束）不打断，音量恢复', () => {
-    const { ws, speech } = makeSession();
+    const { ws, speech } = interruptible();
     ws.deliver({ type: 'response.created', response: {} });
     speech.level = 0.5;
     ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
@@ -850,14 +895,14 @@ describe('RealtimeSession：打断（headline feature）', () => {
   });
 
   test('没有进行中的回复时不发多余的 cancel', () => {
-    const { ws } = makeSession();
+    const { ws } = interruptible();
     ws.sent.length = 0;
     ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
     assert.equal(ws.sentTypes().includes('response.cancel'), false);
   });
 
   test('cancel 之后在途的音频增量被丢弃（实测会再来 4 条）', () => {
-    const { ws, session } = makeSession();
+    const { ws, session } = interruptible();
     ws.deliver({ type: 'response.created', response: {} });
     const speech = (session as unknown as { speech: { enqueue: (v: string) => void } }).speech;
     let enqueued = 0;
@@ -997,10 +1042,25 @@ describe('RealtimeSession：未知事件不能弄死会话', () => {
     assert.match(error!.type === 'error' ? error.message : '', /工具格式不对/);
   });
 
-  test('用户与她的字幕都正确累积并在 done 时定稿', () => {
+  test('她自己的字幕是增量累加，done 时定稿', () => {
+    const { ws, events, session } = makeSession();
+    // 对照用：response.audio_transcript.delta 确实是增量（已实测），所以这里要 += 。
+    ws.deliver({ type: 'response.audio_transcript.delta', delta: '你好' });
+    ws.deliver({ type: 'response.audio_transcript.delta', delta: '呀' });
+    const partial = events.filter((e) => e.type === 'pet_transcript' && !e.final).at(-1);
+    assert.equal(partial!.type === 'pet_transcript' ? partial.text : '', '你好呀');
+    ws.deliver({ type: 'response.audio_transcript.done', transcript: '你好呀' });
+    assert.ok(events.some((e) => e.type === 'pet_transcript' && e.final && e.text === '你好呀'));
+    assert.deepEqual(
+      session.transcript.map((entry) => `${entry.role}:${entry.text}`),
+      ['pet:你好呀'],
+    );
+  });
+
+  test('用户字幕在 completed 时定稿，只进内存不落盘', () => {
     const { ws, events, session } = makeSession();
     ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '你好' });
-    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '呀' });
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '你好呀' });
     const partial = events.filter((e) => e.type === 'user_transcript' && !e.final).at(-1);
     assert.equal(partial!.type === 'user_transcript' ? partial.text : '', '你好呀');
     ws.deliver({
@@ -1020,5 +1080,833 @@ describe('RealtimeSession：未知事件不能弄死会话', () => {
     ws.deliver({ type: 'response.thinking.delta', delta: '让我想想' });
     assert.ok(events.some((e) => e.type === 'thinking' && e.text === '让我想想'));
     assert.ok(events.some((e) => e.type === 'activity' && e.value === 'thinking'));
+  });
+});
+
+// ---------------------------------------------------------------- 累计 delta 回归
+//
+// 用户报「有时候一句话重复好几遍」。实测确认 conversation.item.input_audio_transcription.delta
+// 送的是**累计全量文本**而不是增量（见 shared/realtime.ts 顶部），所以必须赋值而不是 += 。
+// 这一组存在的唯一目的是：有人"顺手改回" += 的时候立刻红。
+
+describe('RealtimeSession：用户转写 delta 是累计全量（回归：一句话重复好几遍）', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  /**
+   * 实测形状：每条 delta 都是从句首开始的完整文本。
+   *
+   * 注意第 1→2 条把「你好呀。」改成了「你好呀，」—— ASR 边听边改标点，
+   * 所以后一条**不保证**是前一条的严格前缀。正因如此，判重不能靠「前缀校验」，
+   * 只能靠「赋值而不是累加」。
+   */
+  const CUMULATIVE = [
+    '你好呀。',
+    '你好呀，我',
+    '你好呀，我今天',
+    '你好呀，我今天想',
+    '你好呀，我今天想跟你',
+    '你好呀，我今天想跟你聊聊天。',
+  ];
+
+  test('喂一串累计 delta，字幕不出现重复前缀', () => {
+    const { ws, events } = makeSession();
+    for (const delta of CUMULATIVE) {
+      ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta });
+    }
+    const texts = events
+      .filter((e) => e.type === 'user_transcript' && !e.final)
+      .map((e) => (e.type === 'user_transcript' ? e.text : ''));
+    assert.equal(texts.length, CUMULATIVE.length, '每条 delta 都该发一次字幕');
+
+    // 1. 每一次发出去的字幕就是那一条 delta 本身（赋值语义）。用 += 的话
+    //    第二条就会变成「你好呀。你好呀，我」，这里立刻红。
+    assert.deepEqual(texts, CUMULATIVE);
+
+    // 2. 最终字幕不比最后一条 delta 长 —— += 会让它长好几倍。
+    const last = texts.at(-1)!;
+    assert.equal(
+      last,
+      CUMULATIVE.at(-1),
+      `字幕被叠起来了（${last}）—— delta 是累计全量，必须赋值而不是 +=`,
+    );
+
+    // 3. 句首只能出现一次。这就是用户肉眼看到的那个 bug。
+    for (const text of texts) {
+      const occurrences = text.split('你好呀').length - 1;
+      assert.equal(occurrences, 1, `「${text}」里「你好呀」出现了 ${occurrences} 次`);
+    }
+
+    // 4. 任何一次字幕都不该超过最长那条 delta 的长度。累加的总长是各条之和
+    //    （这串是 69 个字 vs 最长 14 个字），差一个数量级，糊弄不过去。
+    const longest = Math.max(...CUMULATIVE.map((d) => d.length));
+    for (const text of texts) {
+      assert.ok(
+        text.length <= longest,
+        `字幕长度 ${text.length} 超过了最长的 delta（${longest}）—— 说明被累加了`,
+      );
+    }
+  });
+
+  test('严格递增的累计 delta：每次字幕都正好是当前已听到的全文', () => {
+    // 没有标点改写的那种流，此时「后一条是前一条的前缀」成立，可以直接断前缀。
+    const growing = ['明', '明天', '明天下午', '明天下午三点', '明天下午三点提醒我'];
+    const { ws, events } = makeSession();
+    for (const delta of growing) {
+      ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta });
+    }
+    const texts = events
+      .filter((e) => e.type === 'user_transcript' && !e.final)
+      .map((e) => (e.type === 'user_transcript' ? e.text : ''));
+    assert.deepEqual(texts, growing);
+    for (const text of texts) {
+      assert.ok(
+        growing.at(-1)!.startsWith(text),
+        `字幕「${text}」不是最终文本的前缀 —— 说明被累加了`,
+      );
+    }
+  });
+
+  test('打断确认路径下也不重复（累计 delta + barge-in）', () => {
+    const { ws, events, speech } = makeSession({ interruptible: true });
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5;
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    for (const delta of CUMULATIVE) {
+      ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta });
+    }
+    const last = events
+      .filter((e) => e.type === 'user_transcript' && !e.final)
+      .map((e) => (e.type === 'user_transcript' ? e.text : ''))
+      .at(-1);
+    assert.equal(last, CUMULATIVE.at(-1), '打断路径不该影响字幕的赋值语义');
+    assert.ok(ws.sentTypes().includes('response.cancel'), '听到转写后仍应打断');
+  });
+
+  test('speech_started 会清掉上一轮的残留，新一轮不带旧文本', () => {
+    const { ws, events, speech } = makeSession({ interruptible: true });
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '上一句话' });
+    speech.level = 0;
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '新的' });
+    const last = events
+      .filter((e) => e.type === 'user_transcript' && !e.final)
+      .map((e) => (e.type === 'user_transcript' ? e.text : ''))
+      .at(-1);
+    assert.equal(last, '新的', '新一轮不该带上一轮的文本');
+  });
+
+  test('delta 字段缺失时保住上一次的文本，不变成 undefined', () => {
+    const { ws, events } = makeSession();
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '你好呀' });
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta' });
+    const last = events
+      .filter((e) => e.type === 'user_transcript' && !e.final)
+      .map((e) => (e.type === 'user_transcript' ? e.text : ''))
+      .at(-1);
+    assert.equal(last, '你好呀');
+  });
+});
+
+// ---------------------------------------------------------------- 可打断开关
+
+describe('RealtimeSession：可打断开关关闭时（默认）语音不打断她', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  /** 让她处于「正在说话」的状态。 */
+  function speaking(harness: ReturnType<typeof makeSession>) {
+    harness.ws.deliver({ type: 'response.created', response: {} });
+    harness.speech.level = 0.5;
+    harness.ws.sent.length = 0;
+  }
+
+  test('她说话期间的 VAD 完全被忽略 —— 连音量都不压', () => {
+    const harness = makeSession();
+    speaking(harness);
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.equal(harness.speech.ducked, false, '开关关着时连压音量都不该做');
+    assert.equal(harness.ws.sentTypes().includes('response.cancel'), false, '不该 cancel');
+  });
+
+  test('听到真实转写也不打断（她自己的回声就长这样）', () => {
+    const harness = makeSession();
+    speaking(harness);
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    harness.ws.deliver({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: '确实是人在说话',
+    });
+    assert.equal(
+      harness.ws.sentTypes().includes('response.cancel'),
+      false,
+      '开关关着时即使确认是人声也不能打断',
+    );
+    assert.equal(harness.speech.ducked, false);
+  });
+
+  test('在途音频不被丢弃 —— 她要把话说完', () => {
+    const harness = makeSession();
+    const speech = (harness.session as unknown as { speech: { enqueue: (v: string) => void } })
+      .speech;
+    let enqueued = 0;
+    speech.enqueue = () => {
+      enqueued++;
+    };
+    speaking(harness);
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    harness.ws.deliver({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: '喂',
+    });
+    for (let i = 0; i < 4; i++) {
+      harness.ws.deliver({ type: 'response.audio.delta', delta: 'AAAA' });
+    }
+    assert.equal(enqueued, 4, '没有打断，音频必须继续播');
+  });
+
+  test('被忽略的那一轮不会把活动状态搅乱（她还在说话就不该显示 thinking）', () => {
+    const harness = makeSession();
+    speaking(harness);
+    harness.events.length = 0;
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 300 });
+    const activities = harness.events
+      .filter((e) => e.type === 'activity')
+      .map((e) => (e.type === 'activity' ? e.value : ''));
+    assert.deepEqual(activities, [], `被忽略的 VAD 回合不该发活动事件，实际发了 ${activities}`);
+  });
+
+  // 关键：关掉「语音打断」不等于关掉「开始新回合」。
+  test('她没在说话时仍然正常开始新回合', () => {
+    const { ws, events, speech } = makeSession();
+    speech.level = 0;
+    ws.sent.length = 0;
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.ok(
+      events.some((e) => e.type === 'activity' && e.value === 'listening'),
+      '她闲着的时候用户开口必须切到 listening',
+    );
+    ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 300 });
+    assert.ok(
+      events.some((e) => e.type === 'activity' && e.value === 'thinking'),
+      '说完之后该进 thinking',
+    );
+  });
+
+  test('interrupt() 在开关关闭时依然有效（Esc / 长按走这条）', () => {
+    const harness = makeSession();
+    speaking(harness);
+    harness.session.interrupt();
+    assert.ok(
+      harness.ws.sentTypes().includes('response.cancel'),
+      'interrupt() 是用户明确的动作，不受开关影响',
+    );
+  });
+
+  test('打字输入依然会先把她掐掉', () => {
+    const harness = makeSession();
+    speaking(harness);
+    harness.session.sendText('算了，说点别的');
+    assert.ok(harness.ws.sentTypes().includes('response.cancel'));
+  });
+});
+
+// ---------------------------------------------------------------- 聆听模式 / 按住说话
+
+describe('RealtimeSession：按住说话（listening=false）', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  test('session.update 把 turn_detection 设成 null（否则 VAD 会截断长按）', () => {
+    const { ws } = makeSession({ listening: false });
+    const session = ws.framesOf('session.update')[0].session as Record<string, unknown>;
+    assert.equal(
+      session.turn_detection,
+      null,
+      '按住说话必须关掉服务端 VAD，不然它会按停顿把一句话切成好几个回合',
+    );
+  });
+
+  test('持续聆听模式下 turn_detection 仍然是 server_vad', () => {
+    const { ws } = makeSession({ listening: true });
+    const session = ws.framesOf('session.update')[0].session as Record<string, unknown>;
+    assert.equal((session.turn_detection as { type: string }).type, 'server_vad');
+  });
+
+  test('enableMic() 被拒绝 —— 按住说话模式不许常开麦', async () => {
+    const { session, mic } = makeSession({ listening: false });
+    await session.enableMic();
+    assert.equal(mic.starts, 0, '常开麦会违背「不持续开麦」的承诺');
+  });
+
+  test('长按才开麦；松手提交 commit + response.create 并关麦', async () => {
+    const { session, ws, mic, events } = makeSession({ listening: false });
+    assert.equal(mic.starts, 0, '建会话时不该碰麦克风（权限留到第一次长按）');
+
+    ws.sent.length = 0;
+    await session.beginPushToTalk();
+    assert.equal(mic.starts, 1, '长按才开麦');
+    assert.equal(session.pushToTalkActive, true);
+    mic.feed(); // 用户说了几帧话
+    assert.ok(
+      ws.framesOf('input_audio_buffer.append').length > 0,
+      '按住期间采到的音频要实时 append 上去',
+    );
+    assert.equal(
+      ws.sentTypes().includes('input_audio_buffer.commit'),
+      false,
+      '还按着的时候不能提交',
+    );
+    assert.ok(
+      events.some((e) => e.type === 'activity' && e.value === 'listening'),
+      '长按期间应当显示在听',
+    );
+
+    ws.sent.length = 0;
+    session.endPushToTalk();
+    assert.equal(mic.stops >= 1, true, '松手必须关麦，否则录音指示灯一直亮');
+    assert.equal(session.pushToTalkActive, false);
+    const types = ws.sentTypes();
+    const commitAt = types.indexOf('input_audio_buffer.commit');
+    const respondAt = types.indexOf('response.create');
+    assert.ok(commitAt >= 0, 'VAD 关着时必须手动 commit，否则这段话永远不会变成一个回合');
+    assert.ok(respondAt > commitAt, 'response.create 必须排在 commit 之后');
+    assert.ok(events.some((e) => e.type === 'activity' && e.value === 'thinking'));
+  });
+
+  // 实测：空缓冲区上 commit 会让服务端回两个 error（其中一条是
+  // "input_audio_buffer.append is not called"），用户会看到莫名的错误提示。
+  test('误触的极短长按不提交，而是清掉（空 commit 会让服务端报错）', async () => {
+    const { session, ws, events } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    ws.sent.length = 0;
+    events.length = 0;
+    session.endPushToTalk(); // 一帧都没采到
+    assert.equal(
+      ws.sentTypes().includes('input_audio_buffer.commit'),
+      false,
+      '一帧音频都没有就提交 = 用户看到一个看不懂的错误',
+    );
+    assert.ok(ws.sentTypes().includes('input_audio_buffer.clear'), '误触的残留要清掉');
+    assert.deepEqual(
+      events.filter((e) => e.type === 'activity').map((e) => (e.type === 'activity' ? e.value : '')),
+      ['idle'],
+      '误触之后回到 idle，不要卡在「正在听」',
+    );
+  });
+
+  test('采到的音频够长就正常提交（下限只拦误触，不拦短句）', async () => {
+    const { session, ws, mic } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    mic.feed(MIN_PUSH_TO_TALK_FRAMES);
+    ws.sent.length = 0;
+    session.endPushToTalk();
+    assert.ok(
+      ws.sentTypes().includes('input_audio_buffer.commit'),
+      `${MIN_PUSH_TO_TALK_FRAMES} 帧（约 ${MIN_PUSH_TO_TALK_FRAMES * 40}ms）应当算一次正常说话`,
+    );
+  });
+
+  test('帧数在两次长按之间不累积（上一次的余额不能顶这一次）', async () => {
+    const { session, ws, mic } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    mic.feed(MIN_PUSH_TO_TALK_FRAMES);
+    session.endPushToTalk();
+    await session.beginPushToTalk();
+    ws.sent.length = 0;
+    session.endPushToTalk(); // 这一次什么都没说
+    assert.equal(ws.sentTypes().includes('input_audio_buffer.commit'), false);
+  });
+
+  test('长按前先清缓冲区，上一轮的尾巴不会被算进这一轮', async () => {
+    const { session, ws } = makeSession({ listening: false });
+    ws.sent.length = 0;
+    await session.beginPushToTalk();
+    assert.ok(
+      ws.sentTypes().includes('input_audio_buffer.clear'),
+      '不清掉残留的话，上次没提交的音频会跟这次拼在一起',
+    );
+  });
+
+  test('长按会先打断她（无论可打断开关怎么设）', async () => {
+    const { session, ws, speech } = makeSession({ listening: false, interruptible: false });
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5;
+    ws.sent.length = 0;
+    await session.beginPushToTalk();
+    assert.ok(ws.sentTypes().includes('response.cancel'), '长按就是「闭嘴，听我说」');
+  });
+
+  test('重复长按不会开两次麦', async () => {
+    const { session, mic } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    await session.beginPushToTalk();
+    await session.beginPushToTalk();
+    assert.equal(mic.starts, 1);
+  });
+
+  test('没按就松手是空操作，不会发出假的 commit', () => {
+    const { session, ws } = makeSession({ listening: false });
+    ws.sent.length = 0;
+    session.endPushToTalk();
+    assert.deepEqual(ws.sent, []);
+  });
+
+  test('麦克风权限被拒时如实收场，不把 UI 卡在「正在听」', async () => {
+    const harness = makeSession({ listening: false });
+    harness.mic.failWith = Object.assign(new Error('denied'), { name: 'NotAllowedError' });
+    await harness.session.beginPushToTalk();
+    assert.equal(harness.session.pushToTalkActive, false);
+    assert.equal(
+      harness.events.filter((e) => e.type === 'activity').at(-1)?.type === 'activity'
+        ? (harness.events.filter((e) => e.type === 'activity').at(-1) as { value: string }).value
+        : '',
+      'idle',
+    );
+    harness.ws.sent.length = 0;
+    harness.session.endPushToTalk();
+    assert.deepEqual(harness.ws.sent, [], '没采到音频就不该提交');
+  });
+
+  test('连接断了的时候松手不会把状态卡在 listening', async () => {
+    const { session, ws, events, mic } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    mic.feed();
+    ws.readyState = 3; // 连接没了
+    events.length = 0;
+    session.endPushToTalk();
+    assert.deepEqual(
+      events.filter((e) => e.type === 'activity').map((e) => (e.type === 'activity' ? e.value : '')),
+      ['idle'],
+    );
+  });
+
+  test('持续聆听模式下长按只当「闭嘴听我说」，不手动提交（断句仍交给 VAD）', async () => {
+    const { session, ws, mic, speech } = makeSession({ listening: true });
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5;
+    ws.sent.length = 0;
+    await session.beginPushToTalk();
+    assert.ok(ws.sentTypes().includes('response.cancel'), '仍然要打断她');
+    assert.equal(mic.starts, 0, '麦克风本来就开着，不该再开一次');
+    ws.sent.length = 0;
+    session.endPushToTalk();
+    assert.equal(
+      ws.sentTypes().includes('input_audio_buffer.commit'),
+      false,
+      'VAD 开着的时候手动提交会和 VAD 抢着断句',
+    );
+    assert.equal(mic.stops, 0, '不能把常开的麦关掉');
+  });
+});
+
+// ---------------------------------------------------------------- 运行时切换
+
+describe('RealtimeSession：两个开关都能运行时切换（用户随时在托盘里改）', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  test('setInterruptible(true) 之后语音立刻能打断；再关掉又不能', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: {} });
+    harness.speech.level = 0.5;
+
+    harness.session.setInterruptible(true);
+    harness.ws.sent.length = 0;
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.equal(harness.speech.ducked, true, '打开之后应当恢复 duck-then-confirm');
+    harness.ws.deliver({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: '停一下',
+    });
+    assert.ok(harness.ws.sentTypes().includes('response.cancel'));
+
+    // 再关掉
+    harness.session.setInterruptible(false);
+    harness.ws.deliver({ type: 'response.created', response: {} });
+    harness.speech.level = 0.5;
+    harness.ws.sent.length = 0;
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.equal(harness.speech.ducked, false);
+    assert.equal(harness.ws.sentTypes().includes('response.cancel'), false);
+  });
+
+  test('正压着音量时把开关关掉 → 立刻恢复音量，别让她一直小声说', () => {
+    const harness = makeSession({ interruptible: true });
+    harness.ws.deliver({ type: 'response.created', response: {} });
+    harness.speech.level = 0.5;
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.equal(harness.speech.ducked, true);
+    harness.session.setInterruptible(false);
+    assert.equal(harness.speech.ducked, false, '关掉开关必须立刻 unduck');
+  });
+
+  test('setListening 热改 turn_detection，不重建会话（已实测可以热改）', async () => {
+    const { session, ws, mic } = makeSession({ listening: true });
+    const wsCount = FakeWebSocket.instances.length;
+
+    ws.sent.length = 0;
+    await session.setListening(false);
+    assert.equal(
+      FakeWebSocket.instances.length,
+      wsCount,
+      'turn_detection 能热改，不该为此重建 WebSocket',
+    );
+    const off = ws.framesOf('session.update').at(-1)!.session as Record<string, unknown>;
+    assert.equal(off.turn_detection, null);
+    assert.equal(mic.stops >= 1, true, '切到按住说话必须把常开的麦关掉');
+
+    ws.sent.length = 0;
+    await session.setListening(true);
+    assert.equal(FakeWebSocket.instances.length, wsCount);
+    const on = ws.framesOf('session.update').at(-1)!.session as Record<string, unknown>;
+    assert.equal((on.turn_detection as { type: string }).type, 'server_vad');
+    assert.equal(mic.starts, 1, '切回持续聆听要把麦重新打开');
+  });
+
+  test('切模式时把按着的那一轮收掉，不留没提交的音频', async () => {
+    const { session, ws, mic } = makeSession({ listening: false });
+    await session.beginPushToTalk();
+    mic.feed();
+    ws.sent.length = 0;
+    await session.setListening(true);
+    assert.ok(
+      ws.sentTypes().includes('input_audio_buffer.commit'),
+      '用户正按着时切模式，这段话要么提交要么丢，不能悬着',
+    );
+    assert.equal(session.pushToTalkActive, false);
+  });
+
+  test('切成一样的值是空操作（托盘每次点击都会重读设置）', async () => {
+    const { session, ws } = makeSession({ listening: true, interruptible: false });
+    ws.sent.length = 0;
+    await session.setListening(true);
+    session.setInterruptible(false);
+    assert.deepEqual(ws.sent, [], '值没变就不该推送配置');
+  });
+
+  test('重连之后新开关值跟着一起下发（不是只在建会话时读一次）', async () => {
+    const { session, ws } = makeSession({ listening: true });
+    await session.setListening(false);
+    // 模拟一次重连：旧连接断掉，connect 再跑一遍。
+    ws.readyState = 3;
+    await (session as unknown as { connect: (r: boolean) => Promise<void> }).connect(true);
+    const next = FakeWebSocket.instances.at(-1)!;
+    next.open();
+    const update = next.framesOf('session.update')[0].session as Record<string, unknown>;
+    assert.equal(update.turn_detection, null, '重连之后必须沿用当前的聆听模式');
+  });
+});
+
+// ---------------------------------------------------------------- 假音频栈
+//
+// Brain 层的测试要走 session.start()，那会碰 AudioContext 和 getUserMedia。
+// 这里把它们桩出来 —— 不是为了测音频（测不了），而是为了能数清
+// 「启动了几个 WebSocket」「申请了几次麦克风权限」。
+
+type AudioStubs = {
+  /** getUserMedia 被调了几次 = 向用户申请了几次麦克风。 */
+  getUserMediaCalls: number;
+  liveTracks: number;
+  restore: () => void;
+};
+
+function stubAudio(): AudioStubs {
+  const g = globalThis as Record<string, unknown>;
+  // Node 的 globalThis.navigator 是只读 getter，必须用 defineProperty 覆盖，
+  // 直接赋值会抛 "has only a getter"。
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const saved = {
+    AudioContext: g.AudioContext,
+    AudioWorkletNode: g.AudioWorkletNode,
+    GainNode: g.GainNode,
+  };
+  const stubs: AudioStubs = {
+    getUserMediaCalls: 0,
+    liveTracks: 0,
+    restore: () => {
+      g.AudioContext = saved.AudioContext;
+      g.AudioWorkletNode = saved.AudioWorkletNode;
+      g.GainNode = saved.GainNode;
+      if (savedNavigator) Object.defineProperty(globalThis, 'navigator', savedNavigator);
+      else delete g.navigator;
+    },
+  };
+
+  class FakeAudioContext {
+    sampleRate = 24000;
+    state = 'running';
+    currentTime = 0;
+    destination = {};
+    audioWorklet = { addModule: async () => {} };
+    async resume() {}
+    async close() {}
+    createMediaStreamSource() {
+      return { connect() {}, disconnect() {} };
+    }
+  }
+  class FakeWorkletNode {
+    port = { onmessage: null as unknown, postMessage() {} };
+    connect() {}
+    disconnect() {}
+  }
+  class FakeGainNode {
+    context = { currentTime: 0 };
+    gain = { setTargetAtTime() {} };
+    connect() {}
+    disconnect() {}
+  }
+  g.AudioContext = FakeAudioContext;
+  g.AudioWorkletNode = FakeWorkletNode;
+  g.GainNode = FakeGainNode;
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    writable: true,
+    value: {
+      mediaDevices: {
+        getUserMedia: async () => {
+          stubs.getUserMediaCalls++;
+          stubs.liveTracks++;
+          return {
+            getTracks: () => [
+              {
+                stop: () => {
+                  stubs.liveTracks--;
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  });
+  return stubs;
+}
+
+describe('Brain：并发 start 不能起两套会话（「一句话重复好几遍」的第二个嫌疑）', () => {
+  let audio: AudioStubs;
+  beforeEach(() => {
+    resetWebSocket();
+    audio = stubAudio();
+  });
+  afterEach(async () => {
+    await cleanupSessions();
+    audio.restore();
+  });
+
+  /** 让所有 FakeWebSocket 都 open，这样 session.update 会真的发出去。 */
+  function openAll() {
+    for (const ws of FakeWebSocket.instances) if (ws.readyState === 1) ws.open();
+  }
+
+  test('启动 + 托盘 + 热键同时调 start，只建一个 WebSocket、只申请一次麦克风', async () => {
+    const { desktop } = fakeDesktop();
+    const brain = new Brain({ desktop });
+    const events: PetEvent[] = [];
+    brain.on((e: PetEvent) => events.push(e));
+    try {
+      await Promise.all([brain.start(true), brain.start(true), brain.start(true)]);
+      assert.equal(
+        FakeWebSocket.instances.length,
+        1,
+        `建了 ${FakeWebSocket.instances.length} 个 WebSocket —— 两条连接会让每句话被回两遍`,
+      );
+      assert.equal(
+        audio.getUserMediaCalls,
+        1,
+        `申请了 ${audio.getUserMediaCalls} 次麦克风 —— 两个 MicStream 会把每帧音频送两份`,
+      );
+      assert.deepEqual(
+        events.filter((e) => e.type === 'error').map((e) => (e.type === 'error' ? e.message : '')),
+        [],
+      );
+    } finally {
+      await brain.dispose();
+    }
+  });
+
+  test('先用 withMic=false 起会话，再 start(true) 能补上麦克风', async () => {
+    const { desktop } = fakeDesktop();
+    const brain = new Brain({ desktop });
+    try {
+      await brain.start(false);
+      assert.equal(audio.getUserMediaCalls, 0, '纯打字模式不该弹权限对话框');
+      await brain.start(true);
+      assert.equal(audio.getUserMediaCalls, 1, '后来开语音要能真的把麦打开');
+      assert.equal(FakeWebSocket.instances.length, 1);
+    } finally {
+      await brain.dispose();
+    }
+  });
+
+  test('并发 start 里混着 withMic=false 也不会丢掉麦克风', async () => {
+    const { desktop } = fakeDesktop();
+    const brain = new Brain({ desktop });
+    try {
+      // sendText 走的是 start(false)，和启动时的 start(true) 撞在一起过。
+      await Promise.all([brain.start(false), brain.start(true)]);
+      assert.equal(FakeWebSocket.instances.length, 1);
+      assert.equal(audio.getUserMediaCalls, 1, '被去重的那次 start 不能把麦克风一起吞掉');
+    } finally {
+      await brain.dispose();
+    }
+  });
+
+  test('stop 之后再 start 是干净的一套，旧的麦克风被放掉', async () => {
+    const { desktop } = fakeDesktop();
+    const brain = new Brain({ desktop });
+    try {
+      await brain.start(true);
+      await brain.stop();
+      assert.equal(audio.liveTracks, 0, '停掉之后必须放开麦克风，否则录音指示灯不灭');
+      await brain.start(true);
+      assert.equal(FakeWebSocket.instances.length, 2);
+      assert.equal(audio.liveTracks, 1);
+    } finally {
+      await brain.dispose();
+      assert.equal(audio.liveTracks, 0);
+    }
+  });
+});
+
+describe('Brain：两个开关从设置里读、并能运行时应用', () => {
+  let audio: AudioStubs;
+  beforeEach(() => {
+    resetWebSocket();
+    audio = stubAudio();
+  });
+  afterEach(async () => {
+    await cleanupSessions();
+    audio.restore();
+  });
+
+  /**
+   * 喂几帧音频给会话内部的 MicStream 回调。
+   *
+   * 这里跑不了真麦克风（没有 AudioWorklet），但按住说话的下限判定数的就是帧数，
+   * 所以直接走 onFrame 回调。真实采集链路仍然未验证。
+   */
+  function feedFrames(brain: Brain, frames = MIN_PUSH_TO_TALK_FRAMES) {
+    const mic = (brain as unknown as { session: { mic: { events: { onFrame: (b: string) => void } } } })
+      .session.mic;
+    for (let i = 0; i < frames; i++) mic.events.onFrame('AAAA');
+  }
+
+  test('listening=false 时启动不申请麦克风权限，第一次长按才申请', async () => {
+    const { desktop } = fakeDesktop({ settings: { listening: false } });
+    const brain = new Brain({ desktop });
+    try {
+      await brain.start(true);
+      assert.equal(
+        audio.getUserMediaCalls,
+        0,
+        '按住说话模式下应用一启动就申请麦克风是不可接受的',
+      );
+      FakeWebSocket.instances[0].open();
+      const update = FakeWebSocket.instances[0].framesOf('session.update')[0].session as Record<
+        string,
+        unknown
+      >;
+      assert.equal(update.turn_detection, null);
+
+      await brain.beginPushToTalk();
+      assert.equal(audio.getUserMediaCalls, 1, '第一次长按才申请权限');
+      assert.equal(brain.pushToTalkActive, true);
+      // 模拟采集到了够长的一段音频（真麦克风在这里测不了）。
+      feedFrames(brain);
+      brain.endPushToTalk();
+      assert.equal(audio.liveTracks, 0, '松手要放开麦克风');
+      const types = FakeWebSocket.instances[0].sentTypes();
+      assert.ok(types.includes('input_audio_buffer.commit'));
+      assert.ok(types.includes('response.create'));
+    } finally {
+      await brain.dispose();
+    }
+  });
+
+  test('refreshSettings 把新开关值应用到正在进行的会话上', async () => {
+    const { desktop } = fakeDesktop({ settings: { listening: true, voiceInterruptible: false } });
+    const brain = new Brain({ desktop });
+    try {
+      await brain.start(true);
+      FakeWebSocket.instances[0].open();
+      const ws = FakeWebSocket.instances[0];
+      assert.equal(brain.listening, true);
+      assert.equal(brain.voiceInterruptible, false);
+
+      // 用户在托盘里改了两个开关。
+      await desktop.setSettings({ listening: false, voiceInterruptible: true });
+      ws.sent.length = 0;
+      const applied = await brain.refreshSettings();
+      assert.equal(applied.listening, false);
+      assert.equal(brain.listening, false);
+      assert.equal(brain.voiceInterruptible, true);
+
+      // turn_detection 走热改，不重建连接。
+      assert.equal(FakeWebSocket.instances.length, 1, '改开关不该重建会话');
+      const update = ws.framesOf('session.update').at(-1)!.session as Record<string, unknown>;
+      assert.equal(update.turn_detection, null, '新的聆听模式必须真的推下去');
+      assert.equal(audio.liveTracks, 0, '切到按住说话要把常开的麦放掉');
+      // instructions 也要跟着更新，让她知道用户现在得长按才能说话。
+      assert.match(String(update.instructions), /长按/);
+    } finally {
+      await brain.dispose();
+    }
+  });
+
+  test('refreshSettings 在会话没起来时不炸', async () => {
+    const { desktop } = fakeDesktop();
+    const brain = new Brain({ desktop });
+    const settings = await brain.refreshSettings();
+    assert.equal(settings.listening, true);
+    await brain.dispose();
+  });
+
+  test('beginPushToTalk 在会话还没起来时会先把会话起起来', async () => {
+    const { desktop } = fakeDesktop({ settings: { listening: false } });
+    const brain = new Brain({ desktop });
+    try {
+      await brain.beginPushToTalk();
+      assert.equal(FakeWebSocket.instances.length, 1, '长按应当顺手把会话起起来');
+      assert.equal(audio.getUserMediaCalls, 1);
+    } finally {
+      await brain.dispose();
+    }
+  });
+});
+
+describe('persona：两个开关如实写进 instructions', () => {
+  test('按住说话模式下告诉她「按住我说」，而不是「你说吧」', () => {
+    const text = buildInstructions({
+      settings: { ...defaultSettings, listening: false },
+      desktopAvailable: true,
+    });
+    assert.match(text, /持续聆听：已关闭/);
+    assert.match(text, /长按/);
+    const on = buildInstructions({
+      settings: { ...defaultSettings, listening: true },
+      desktopAvailable: true,
+    });
+    assert.match(on, /持续聆听：已开启/);
+  });
+
+  test('不可打断时仍然要求她说短话（用户想插话得专门按键）', () => {
+    const text = buildInstructions({
+      settings: { ...defaultSettings, voiceInterruptible: false },
+      desktopAvailable: true,
+    });
+    assert.match(text, /语音打断：已关闭/);
+    assert.match(text, /1~3 句/);
+    const on = buildInstructions({
+      settings: { ...defaultSettings, voiceInterruptible: true },
+      desktopAvailable: true,
+    });
+    assert.match(on, /语音打断：已开启/);
+  });
+
+  test('默认值与契约一致：聆听开、语音打断关', () => {
+    assert.equal(defaultSettings.listening, true);
+    assert.equal(defaultSettings.voiceInterruptible, false);
   });
 });

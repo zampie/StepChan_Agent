@@ -2,10 +2,16 @@
 //
 // 与旧版 PetRenderer 的区别：旧版是「整图换帧」——每个表情一张全身图，切表情就是换贴图。
 // 这里是 base 全身图 + 眼/眉/嘴覆盖层，覆盖层的位置来自 tools/art 的像素 diff 实测，
-// 不是手标的。动画全部程序化（呼吸、摇摆、眨眼、挤压拉伸、落地回弹），没有序列图。
+// 不是手标的。动画全部程序化（呼吸、摇摆、眨眼、挤压拉伸、悬挂摆动、落地回弹），没有序列图。
 //
-// 解耦约定：本文件不 import voice/ 或 brain/ 下的任何东西。
-// 音频电平、情绪意图都由 UI 推进来，渲染器只负责「怎么插值」。
+// 三组对外行为，顺带说明各自的参数在哪（这里一个「手感数字」都不该硬编码）：
+//   - 表情 / 口型 / 动作：rig.json（tools/art/register.py 的像素 diff 配准）。
+//   - StepFun logo 图层：logo.json（tools/art/logo.py 的 SVG 几何 + 旧徽章实测覆盖半径）。
+//     位置/直径/自转全在清单里；本文件只放「怎么动」（LOGO_MOTION）。
+//   - 拖拽的抓娃娃机手感 + 单击反应：motion.ts 的 clawFeel / tapReactions.ts 的 tapPools。
+//
+// 解耦约定：本文件不 import voice/ 或 brain/ 下的任何东西，也不监听任何 DOM 事件。
+// 音频电平、情绪意图、拖拽与单击都由 UI 推进来，渲染器只负责「怎么插值」。
 import { Application, Assets, Container, Sprite, Texture } from 'pixi.js';
 // Pixi 默认用 new Function() 动态拼着色器/批处理代码，而我们的 CSP 是 script-src 'self'，
 // 于是 app.init() 直接抛 "Current environment does not allow unsafe-eval"，
@@ -22,8 +28,23 @@ import {
   type RigManifest,
   type Viseme,
 } from '../../../../shared/pet';
-import { BlinkScheduler, Spring, breathe, crossfadeMs, easeInOut, fxPose, squash, sway } from './motion';
-import { loadRig, proceduralActions, type LoadedRig } from './rigManifest';
+import {
+  BlinkScheduler,
+  ShuffleBag,
+  Spring,
+  breathe,
+  clawFeel,
+  clawPose,
+  crossfadeMs,
+  easeInOut,
+  fxPose,
+  sagTarget,
+  sway,
+  swingTarget,
+} from './motion';
+import { loadRig, proceduralActions, isNoopAction, type LoadedRig } from './rigManifest';
+import { logoSlots, type LogoPlacement } from './logoManifest';
+import { tapActionHoldMs, tapPools, tapTargetOf, type TapReaction, type TapTarget } from './tapReactions';
 import { VisemeTracker } from './visemeMap';
 import { reportDiagnostic } from '../platform/diagnostics';
 
@@ -64,6 +85,31 @@ const PROCEDURAL_POSE: Partial<Record<ActionName, { rotation: number }>> = {
 /** 这些眼型本身就是闭着/变形的，再叠眨眼只会打架。 */
 const NO_BLINK: ReadonlySet<EyeState> = new Set<EyeState>(['closed', 'half', 'smile']);
 
+/**
+ * StepFun logo 图层的**动态**参数。
+ *
+ * 静态参数（圆心、直径、自转）全部在 logo.json 的 placements 里，由 tools/art/logo.py
+ * 生成，这里一个都不许硬编码 —— 这是「以后微调只改一个数」的前提。
+ * 这里只放「怎么动」：logo 贴在身上，所以呼吸/摇摆/倾斜/悬挂都由 body 容器的变换
+ * 自动带上；额外要做的只有发饰那枚夹子的**滞后抖动**。
+ *
+ * 做法是一根软弹簧跟踪身体的总旋转角，差值（身体转了、夹子还没跟上）换算成夹子的额外自转。
+ * 这就是二级动作：身体停下的瞬间夹子还在晃。placement.jiggle 是每个位置的系数
+ * （发饰 0.35、胸前 0 —— 贴在平整衣料上的东西不该自己晃）。
+ */
+const LOGO_MOTION = {
+  /** 滞后差值 → 额外自转的增益。 */
+  followGain: 2.4,
+  /** 额外自转上限，rad（≈7.5°）。再大就从头发上掉下来了。 */
+  maxExtraRotation: 0.13,
+  /** 跟踪身体旋转的软弹簧。欠阻尼（临界阻尼是 2√70 ≈ 16.7），所以会自己晃几下。 */
+  stiffness: 70,
+  damping: 6,
+} as const;
+
+/** 单击反馈的挤压冲量：先压一下，再由弹簧弹回（squash 输入 / 每秒）。 */
+const TAP_POKE = { squash: -0.1, velocity: 1.4 } as const;
+
 interface Slot {
   /** 正在淡入的层。 */
   cur: Sprite;
@@ -78,6 +124,12 @@ interface FxInstance {
   age: number;
   baseX: number;
   baseY: number;
+}
+
+/** logo 的一枚实例：贴图 + 它在清单里的那份静态参数。 */
+interface LogoInstance {
+  sprite: Sprite;
+  placement: LogoPlacement;
 }
 
 export class RigRenderer {
@@ -104,6 +156,9 @@ export class RigRenderer {
   private mouth: Slot | null = null;
   private blush = new Sprite();
   private blushTarget = 0;
+  /** StepFun logo 层。挂在 body 下、faceSprite 之上 —— 整脸 sprite 会盖住整个画布。 */
+  private logoLayer = new Container();
+  private logos: LogoInstance[] = [];
 
   private textures = new Map<string, Texture>();
   private failed = new Set<string>();
@@ -119,19 +174,40 @@ export class RigRenderer {
   private dragging = false;
   private dragVx = 0;
   private dragVy = 0;
-  /** 拖拽惯性倾斜。 */
-  private tiltSpring = new Spring(150, 14);
-  /** 程序化动作姿态（目前只有 tilt）。单独一根弹簧，和拖拽倾斜叠加而不是互相覆盖。 */
+  // ---- 抓娃娃机：五根弹簧 ----
+  /** 被提起的程度 0..1。整个悬挂姿态都乘在它上面，所以放下时会平滑收回。 */
+  private liftSpring = new Spring(110, 17);
+  /** 悬挂摆角。刻意欠阻尼（临界阻尼 2√95 ≈ 19.5，这里 7.5）→ 会自己来回摆几下。 */
+  private swingSpring = new Spring(95, 7.5);
+  /** 下半身跟踪摆角的软弹簧。它和 swing 的差值就是「下身拖后一拍」。 */
+  private lagSpring = new Spring(48, 9);
+  /** 重力下垂（竖向拉伸）。 */
+  private sagSpring = new Spring(140, 15);
+  /** 程序化动作姿态（目前只有 tilt）。单独一根弹簧，和悬挂摆角叠加而不是互相覆盖。 */
   private poseSpring = new Spring(120, 15);
-  private stretchSpring = new Spring(220, 13);
   private reboundSpring = new Spring(260, 12);
   private rebound = 0;
+  /** 单击的挤压反馈。和落地回弹分开，免得点一下把正在回弹的动作打断。 */
+  private tapSpring = new Spring(320, 12);
+  /** 发饰那枚 logo 的滞后跟踪器（见 LOGO_MOTION）。 */
+  private logoSpring = new Spring(LOGO_MOTION.stiffness, LOGO_MOTION.damping);
+
+  /** 单击触发的临时动作剩余时长（ms）。归零时自动回 idle。 */
+  private tapActionLeft = 0;
+  /** 每个部位一个洗牌袋，保证「每次换一个」。按需建，因为可用性要等素材加载完才知道。 */
+  private tapBags = new Map<TapTarget, ShuffleBag<TapReaction>>();
 
   private fx: FxInstance[] = [];
   private clock = 0;
   private size: number;
   private reduceMotion: boolean;
   private observer?: ResizeObserver;
+  /** 容器尺寸与上一帧的支点，供 layout() 在两帧之间保持姿态不跳。 */
+  private hostW = 0;
+  private hostH = 0;
+  private lastPivotY = 1;
+  private lastRise = 0;
+  private lastScaleY = 1;
 
   constructor(private opts: RigRendererOptions) {
     this.size = opts.size ?? 280;
@@ -142,9 +218,17 @@ export class RigRenderer {
     return this.ready ? (this.app.canvas as HTMLCanvasElement) : null;
   }
 
-  /** 本次加载被降级的条目（供 UI 显示，不要静默吞掉）。 */
-  get degraded() {
-    return this.manifest?.degraded ?? [];
+  /**
+   * 本次加载被降级的条目（供 UI 显示，不要静默吞掉）。
+   * 合并了 rig.json 与 logo.json 两份清单，以及 logo.json 本身加载失败的情况 ——
+   * logo 是 sidecar，它的降级不会出现在 rig.json 里，不合并就等于静默。
+   */
+  get degraded(): { name: string; reason: string }[] {
+    return [
+      ...(this.manifest?.degraded ?? []),
+      ...(this.rig?.logo?.manifest.degraded ?? []),
+      ...(this.rig?.logoError ? [{ name: 'logo', reason: this.rig.logoError }] : []),
+    ];
   }
 
   /**
@@ -212,6 +296,11 @@ export class RigRenderer {
     }
     if (this.disposed) return;
     this.manifest = this.rig.manifest;
+    if (this.rig.logoError) {
+      // 不致命（角色照常显示），但必须留痕：症状是「身上还是那个假徽章」，
+      // 没有这条日志的话根本看不出是 sidecar 清单没加载成功。
+      reportDiagnostic(`rig: ${this.rig.logoError}`);
+    }
 
     await this.loadTextures();
     if (this.disposed) return;
@@ -242,9 +331,18 @@ export class RigRenderer {
     this.reduceMotion = on;
     if (on) {
       this.blink.reset();
-      this.tiltSpring.snap(0);
-      this.stretchSpring.snap(0);
-      this.reboundSpring.snap(0);
+      for (const s of [
+        this.liftSpring,
+        this.swingSpring,
+        this.lagSpring,
+        this.sagSpring,
+        this.reboundSpring,
+        this.tapSpring,
+        this.logoSpring,
+      ]) {
+        s.snap(0);
+      }
+      this.rebound = 0;
     }
   }
 
@@ -265,6 +363,8 @@ export class RigRenderer {
   }
 
   playAction(action: ActionName) {
+    // 外部显式换动作 → 取消单击的自动回 idle，否则 1.4 s 后会把别人刚设的姿势抹掉。
+    this.tapActionLeft = 0;
     if (action === this.action) return;
     const asset = this.manifest?.actions[action];
     if (!asset) return;
@@ -279,6 +379,7 @@ export class RigRenderer {
     // 这不是偷懒，是流水线能保证的边界：动作图自带表情。
     // 程序化动作用的是 idle 的图，画幅没变，所以覆盖层继续有效。
     this.setLayersVisible(action === 'idle' || proceduralActions.has(action));
+    this.syncLogoVisibility();
   }
 
   spawnFx(name: FxName) {
@@ -299,7 +400,12 @@ export class RigRenderer {
     this.fx.push({ sprite, age: 0, baseX, baseY });
   }
 
-  /** @param velocity 指针速度（px/s），用于惯性倾斜与拉伸。 */
+  /**
+   * 拖拽状态。被提起时走「抓娃娃机」姿态：支点搬到头顶、身体垂下、随手摆动、放下落地回弹。
+   * 具体数学在 motion.ts 的 clawPose / clawFeel，参数都集中在 clawFeel 里。
+   *
+   * @param velocity 指针速度（px/s），决定摆幅与下垂量。不给就按 0 处理（提着不动）。
+   */
   setDragging(on: boolean, velocity?: { x: number; y: number }) {
     if (on) {
       this.dragVx = velocity?.x ?? 0;
@@ -310,11 +416,44 @@ export class RigRenderer {
       this.dragging = false;
       this.dragVx = 0;
       this.dragVy = 0;
-      // 落地回弹：先给弹簧一个初速度，让它自己过冲再收敛。
+      // 落地回弹：从「压扁」出发给一个向上的初速度，让它自己冲过 0 再收敛 ——
+      // 顺序是砸地压扁 → 弹起拉长 → 稳住。反过来（先拉长）看起来像又被往上提了一下。
       this.rebound = 1;
-      this.reboundSpring.value = 0.24;
-      this.reboundSpring.velocity = -1.6;
+      this.reboundSpring.value = -clawFeel.landBounce;
+      this.reboundSpring.velocity = clawFeel.landVelocity;
     }
+  }
+
+  /**
+   * 单击反应：每次换一个表情/动作/特效，不连续重复，按部位分组。
+   *
+   * 只暴露 API，**不监听任何 DOM 事件** —— 点击命中判定在 Rust 侧（见 hittest.rs），
+   * 事件由 UI 转进来。
+   *
+   * @param part 被点到的部位。接受 TouchPart（head/cheek/badge/hand）以及渲染层专属的
+   *             'skirt'；认不出来的字符串（含 null）走 default 组，不报错。
+   * @returns 实际应用的那条反应，便于上层记日志；渲染器还没就绪时返回 null。
+   */
+  reactToTap(part?: string | null): TapReaction | null {
+    if (!this.ready || !this.manifest) return null;
+    const reaction = this.nextTapReaction(tapTargetOf(part));
+    if (!reaction) return null;
+    if (reaction.expression) this.setExpression(reaction.expression);
+    if (reaction.action) {
+      this.playAction(reaction.action);
+      // playAction 会把它清零（外部换动作要能取消自动回位），所以在后面设。
+      this.tapActionLeft = tapActionHoldMs;
+    }
+    if (reaction.fx) this.spawnFx(reaction.fx);
+    // 眨眼和挤压是纯动效，reduceMotion 下跳过；表情和动作是「状态」，照常生效。
+    if (!this.reduceMotion) {
+      if (reaction.blink) this.blink.trigger(reaction.blink === 'double');
+      if (reaction.poke) {
+        this.tapSpring.value = TAP_POKE.squash;
+        this.tapSpring.velocity = TAP_POKE.velocity;
+      }
+    }
+    return reaction;
   }
 
   /** 外部可以手动推进（测试或自定义 ticker）。dtMs 为本帧毫秒数。 */
@@ -322,6 +461,16 @@ export class RigRenderer {
     if (this.disposed || !this.ready || !this.manifest) return;
     const dt = Math.min(0.05, Math.max(0.001, dtMs / 1000));
     this.clock += dtMs;
+
+    // 单击触发的临时动作到点就回 idle。用倒计时而不是 setTimeout：
+    // 渲染器销毁时不用额外清理，页面隐藏（ticker 停）时也不会在后台乱跳。
+    if (this.tapActionLeft > 0) {
+      this.tapActionLeft -= dtMs;
+      if (this.tapActionLeft <= 0) {
+        this.tapActionLeft = 0;
+        this.playAction('idle');
+      }
+    }
 
     this.stepFades(dtMs);
     this.stepFace(dtMs);
@@ -359,6 +508,8 @@ export class RigRenderer {
     }
     for (const a of Object.values(m.actions)) files.add(a.file);
     for (const f of Object.values(m.fx)) files.add(f.file);
+    const logoAsset = this.rig?.logo?.manifest.asset;
+    if (logoAsset) files.add(logoAsset.file);
 
     const reasons = new Set<string>();
     await Promise.all(
@@ -422,9 +573,82 @@ export class RigRenderer {
     this.faceSprite.visible = false;
     this.body.addChild(this.faceSprite);
 
+    // logo 必须在 faceSprite **之后**加：整脸 sprite 是满画布的，排在它前面会被整块盖掉。
+    this.buildLogo();
+    this.body.addChild(this.logoLayer);
+
     this.root.addChild(this.body, this.fxLayer);
     this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * m.anchor.y);
     this.app.stage.addChild(this.root);
+  }
+
+  /**
+   * 按 logo.json 的 placements 建 logo sprite。
+   *
+   * 位置/直径/自转全部来自清单，这里只做「清单 → sprite 属性」的翻译。
+   * 贴图是 256 px 的，按 placement.size 缩到 17–31 px —— 所以放大桌宠或换 retina
+   * 不会糊，而且以后想调大小只改 logo.py 的 COVER_MARGIN / LOGO_TUNING。
+   */
+  private buildLogo() {
+    const logo = this.rig?.logo;
+    if (!logo) return;
+    const tex = this.textures.get(logo.manifest.asset.file);
+    if (!tex) {
+      // 贴图没下来已经在 loadTextures 里报过了；这里只记一条指向性更强的。
+      reportDiagnostic(`logo 贴图缺失：${logo.manifest.asset.file}，身上会留着假徽章`);
+      return;
+    }
+    for (const slot of logoSlots) {
+      const p = logo.manifest.placements[slot];
+      if (!p) continue;
+      const sprite = new Sprite(tex);
+      sprite.anchor.set(0.5);
+      sprite.width = p.size;
+      sprite.height = p.size;
+      sprite.position.set(p.cx, p.cy);
+      sprite.rotation = p.rotation;
+      this.logoLayer.addChild(sprite);
+      this.logos.push({ sprite, placement: p });
+    }
+    this.syncLogoVisibility();
+  }
+
+  /**
+   * logo 层只在 logo.json 的 appliesTo 列出的动作下显示。
+   *
+   * 和脸部覆盖层同一条边界：位置是按 idle 画幅实测的，换姿势的动作图上徽章挪位了，
+   * 继续贴就会把 logo 贴到腋下。这条降级写在 logo.json 的 degraded 里，不是静默的。
+   */
+  private syncLogoVisibility() {
+    const logo = this.rig?.logo;
+    this.logoLayer.visible = !!logo && logo.appliesTo.has(this.action) && this.logos.length > 0;
+  }
+
+  /**
+   * 取下一条单击反应。
+   *
+   * 两件事在这里做，不在 tapReactions.ts 里做 —— 它们都依赖**运行时**的清单与贴图：
+   * 1. 可用性消毒。rig.json 里「没做出来」的动作指向 idle 的整身图（sha256 == base），
+   *    播出去等于「说要指给你看然后一动不动」；缺贴图的特效同理。
+   *    这类字段直接抹掉而不是把整条反应丢掉 —— 丢掉会缩小候选池，
+   *    而每条反应至少还换一个表情，仍然是「换了一个」。
+   * 2. 洗牌袋按部位缓存，所以「不连续重复」是按部位算的：
+   *    连点头顶不会重复，但头顶和脸颊各自的轮转互不干扰（它们本来就是不同的反应）。
+   */
+  private nextTapReaction(target: TapTarget): TapReaction | null {
+    let bag = this.tapBags.get(target);
+    if (!bag) {
+      const m = this.manifest!;
+      const sanitized = tapPools[target].map((r) => ({
+        ...r,
+        action: r.action && !isNoopAction(m, r.action) ? r.action : undefined,
+        fx: r.fx && this.textures.has(m.fx[r.fx].file) ? r.fx : undefined,
+      }));
+      if (sanitized.length === 0) return null;
+      bag = new ShuffleBag<TapReaction>(sanitized);
+      this.tapBags.set(target, bag);
+    }
+    return bag.next();
   }
 
   /** 覆盖层当前是否成立。程序化动作用的是 idle 的图，画幅没变，覆盖层继续有效。 */
@@ -550,18 +774,24 @@ export class RigRenderer {
     if (this.reduceMotion) {
       this.root.scale.set(scale);
       // reduceMotion 下程序化动作仍然生效 —— 它表达的是「姿势」，不是「动效」。
-      // 只是不做弹簧过渡，直接到位。
+      // 只是不做弹簧过渡，直接到位。拖拽的悬挂效果整个关掉。
       this.root.rotation = pose;
       this.poseSpring.snap(pose);
+      this.body.skew.x = 0;
+      for (const l of this.logos) l.sprite.rotation = l.placement.rotation;
+      this.applyPivot(m.anchor.y, 0, scale);
       return;
     }
 
     const br = breathe(this.clock);
-    const tilt = this.tiltSpring.step(this.dragging ? clamp(-this.dragVx / 2600, -0.22, 0.22) : 0, dt);
-    const stretchTarget = this.dragging
-      ? clamp(Math.hypot(this.dragVx, this.dragVy) / 4200, 0, 0.2)
-      : 0;
-    const stretch = this.stretchSpring.step(stretchTarget, dt);
+
+    // ---- 抓娃娃机 ----
+    // lift 是「被提起的程度」，其余各项都乘在它上面（见 clawPose），所以放手时会平滑收回，
+    // 不需要额外的退出动画。
+    const lift = this.liftSpring.step(this.dragging ? 1 : 0, dt);
+    const swing = this.swingSpring.step(this.dragging ? swingTarget(this.dragVx) : 0, dt);
+    const lag = this.lagSpring.step(swing, dt);
+    const sag = this.sagSpring.step(this.dragging ? sagTarget(this.dragVy) : 0, dt);
 
     let reboundS = 0;
     if (this.rebound > 0) {
@@ -571,10 +801,69 @@ export class RigRenderer {
         this.reboundSpring.snap(0);
       }
     }
+    // 单击挤压：目标恒为 0，靠 reactToTap 打进去的初值和初速度自由衰减。
+    const tap = this.tapSpring.step(0, dt);
 
-    const sq = squash(stretch + reboundS);
-    this.root.scale.set(scale * br.scaleX * sq.scaleX, scale * br.scaleY * sq.scaleY);
-    this.root.rotation = this.poseSpring.step(pose, dt) + tilt + sway(this.clock);
+    const claw = clawPose(
+      { lift, swing, lag, sag, rebound: reboundS + tap },
+      clawFeel,
+      m.anchor.y,
+    );
+    const scaleX = scale * br.scaleX * claw.scaleX;
+    const scaleY = scale * br.scaleY * claw.scaleY;
+    this.root.scale.set(scaleX, scaleY);
+    // 站地时是「程序化姿势 + 闲置摇摆」；提起来后摇摆淡出、悬挂摆角接管。
+    // 两者不是互斥开关，而是按 lift 交叉淡入 —— 否则抓起/放下的瞬间会突然一跳。
+    this.root.rotation =
+      this.poseSpring.step(pose, dt) + claw.rotation + sway(this.clock) * (1 - lift);
+    // 下半身滞后的切变。支点是画幅顶（body 的局部原点），所以头顶 0 位移、脚底最大。
+    this.body.skew.x = claw.skewX;
+    this.applyPivot(claw.pivotY, claw.riseFrac, scaleY);
+    this.stepLogo(this.root.rotation, dt);
+  }
+
+  /**
+   * 更新旋转支点与落脚点。
+   *
+   * 支点上移时**必须**反向补偿位置：Pixi 的 pivot 是在局部坐标里挖一个新原点，
+   * 不补偿的话把支点从脚底搬到头顶，角色会整体往下掉一个身高。
+   * 补偿式来自「脚底那一点要落在容器底边」：
+   *   screenY(脚底) = position.y + (anchorY − pivotY) · canvasH · scaleY ≡ hostH + rise
+   */
+  private applyPivot(pivotY: number, riseFrac: number, scaleY: number) {
+    const m = this.manifest!;
+    const w = this.hostW || this.size;
+    const h = this.hostH || this.size;
+    this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * pivotY);
+    this.root.position.set(
+      w / 2,
+      h + riseFrac * this.size - (m.anchor.y - pivotY) * m.canvas.height * scaleY,
+    );
+    this.lastPivotY = pivotY;
+    this.lastRise = riseFrac;
+    this.lastScaleY = scaleY;
+  }
+
+  /**
+   * logo 的二级动作：软弹簧跟踪身体旋转，差值换算成额外自转。
+   * jiggle=0 的位置（胸前）直接贴死，不走弹簧 —— 衣料上的东西不该自己晃。
+   */
+  private stepLogo(bodyRotation: number, dt: number) {
+    if (this.logos.length === 0) return;
+    const tracked = this.logoSpring.step(bodyRotation, dt);
+    const lagAngle = bodyRotation - tracked;
+    for (const l of this.logos) {
+      if (l.placement.jiggle <= 0) {
+        l.sprite.rotation = l.placement.rotation;
+        continue;
+      }
+      const extra = clamp(
+        lagAngle * LOGO_MOTION.followGain * l.placement.jiggle,
+        -LOGO_MOTION.maxExtraRotation,
+        LOGO_MOTION.maxExtraRotation,
+      );
+      l.sprite.rotation = l.placement.rotation + extra;
+    }
   }
 
   private stepFx(dtMs: number) {
@@ -612,10 +901,14 @@ export class RigRenderer {
     const w = this.opts.host.clientWidth || this.size;
     const h = this.opts.host.clientHeight || this.size;
     this.app.renderer.resize(w, h);
+    this.hostW = w;
+    this.hostH = h;
     const m = this.manifest;
-    // 锚点在脚底中心 → 角色站在容器底部，窗口再小也不会把脚切掉。
-    this.root.position.set(w / 2, h);
     this.root.scale.set(this.size / m.canvas.height);
+    // 锚点在脚底中心 → 角色站在容器底部，窗口再小也不会把脚切掉。
+    // 用上一帧的支点而不是写死脚底：resize 可能发生在被提起来的中途，
+    // 写死的话会在下一帧 stepPose 纠正前闪一下。
+    this.applyPivot(this.lastPivotY, this.lastRise, this.lastScaleY);
   }
 
   private onVisibility = () => {

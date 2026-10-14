@@ -16,7 +16,7 @@
     "tauri": "tauri",
     "sync-rig": "node scripts/sync-rig.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test --test-timeout=30000 tests/*.test.ts",
     "build": "npm run sync-rig && npm run typecheck && npm run tauri -- build",
     "build:web": "npm run sync-rig && npm run build -w @stepchan/web",
     "build:debug": "npm run sync-rig && npm run tauri -- build --debug --bundles app",

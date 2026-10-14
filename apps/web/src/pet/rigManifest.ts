@@ -1,11 +1,19 @@
 // rig.json 的加载与校验。
 // 清单由 tools/art 生成，运行时只读。校验用 shared/pet.ts 的 schema —— 渲染器不自己定义结构。
 import { actions, rigManifestSchema, type ActionName, type RigManifest } from '../../../../shared/pet';
+import { logoUrlFor, parseLogoManifest, type LoadedLogo } from './logoManifest';
 
 export interface LoadedRig {
   manifest: RigManifest;
   /** 素材文件所在目录（含结尾斜杠），由清单 URL 推出。 */
   baseUrl: string;
+  /**
+   * StepFun logo 图层（sidecar 清单，见 logoManifest.ts 顶部为什么不在 rig.json 里）。
+   * 取不到时为 null —— 角色照常显示，只是身上留着 master 自带的假徽章。
+   * 原因写进 logoError，由渲染器喊出去，不静默。
+   */
+  logo: LoadedLogo | null;
+  logoError: string | null;
 }
 
 /**
@@ -39,7 +47,18 @@ export async function loadRig(manifestUrl: string, fetchImpl: typeof fetch = fet
     const first = parsed.error.issues[0];
     throw new Error(`rig.json 不符合契约：${first.path.join('.')} ${first.message}`);
   }
-  return { manifest: parsed.data, baseUrl: resolveBaseUrl(manifestUrl) };
+  // logo 是 sidecar，**不**让它的失败挡住整个角色：没有 logo 层角色还能用，
+  // 而 rig.json 挂了什么都没有。所以这里吞异常但把原因留下。
+  let logo: LoadedLogo | null = null;
+  let logoError: string | null = null;
+  try {
+    const lres = await fetchImpl(logoUrlFor(manifestUrl));
+    if (!lres.ok) throw new Error(`HTTP ${lres.status}`);
+    logo = parseLogoManifest(await lres.json());
+  } catch (e) {
+    logoError = `logo.json 不可用（${(e as Error)?.message ?? String(e)}）：身上会留着 master 自带的假徽章`;
+  }
+  return { manifest: parsed.data, baseUrl: resolveBaseUrl(manifestUrl), logo, logoError };
 }
 
 /** 清单里声明为降级的条目，UI 可以据此显示「这个表情没有分层」。 */

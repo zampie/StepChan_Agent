@@ -11,6 +11,9 @@
 //   "session.tools[0].function.name is required"。
 // - 单会话最长 30 分钟（文档）。
 // - 模型首次出音后 voice 不可改 → 换音色必须重建会话。
+// - **用户语音转写的 delta 是「累计全量文本」，不是增量**（实测 14 条 delta，
+//   每条都是从句首开始的完整前缀）。拿它做 += 会把一句话叠成好几遍。
+//   而她自己的 response.audio_transcript.delta 确实是增量 —— 两者不对称，别想当然。
 import { z } from 'zod';
 
 export const REALTIME_URL = 'wss://api.stepfun.com/v1/realtime';

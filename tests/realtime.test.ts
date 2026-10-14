@@ -14,6 +14,8 @@ import {
   serverEventSchema,
   toolDefinitionSchema,
   REALTIME_SAMPLE_RATE,
+  type ClientEvent,
+  type SessionConfig,
 } from '../shared/realtime';
 import { toolArgSchemas, toolDefinitions, toolNames } from '../shared/brain';
 
@@ -61,6 +63,37 @@ describe('parseServerEvent：真实抓包', () => {
     const vad = byType.get('input_audio_buffer.speech_started');
     assert.ok(vad, 'fixture 里缺 VAD 事件 —— 打断全靠它');
     assert.equal(parseServerEvent(JSON.stringify(vad)).type, 'input_audio_buffer.speech_started');
+  });
+
+  // 「一句话重复好几遍」那个 bug 的协议侧依据。
+  //
+  // 用户转写的 delta 是**累计全量文本**，不是增量：抓包里这条 delta 是
+  // completed 里整句话的前缀，而不是句子中间的一小段。她自己的
+  // response.audio_transcript.delta 则确实是增量 —— 两者不对称。
+  // 行为侧（赋值而不是 +=）的回归测试在 tests/brain.test.ts。
+  test('用户转写 delta 是整句的前缀（累计全量），不是句中片段', () => {
+    const byType = new Map(fixtures.map((f) => [f.type, f]));
+    const delta = byType.get('conversation.item.input_audio_transcription.delta')?.delta as string;
+    const full = byType.get('conversation.item.input_audio_transcription.completed')
+      ?.transcript as string;
+    assert.equal(typeof delta, 'string');
+    assert.equal(typeof full, 'string');
+    assert.ok(
+      full.startsWith(delta),
+      `抓到的 delta ${JSON.stringify(delta)} 不是整句 ${JSON.stringify(full)} 的前缀 —— ` +
+        '这条抓包是「delta 是累计全量」的依据，形状变了就要重新验证累加语义',
+    );
+    assert.ok(delta.length < full.length, 'delta 应当是说到一半时的快照');
+  });
+
+  test('她自己的字幕 delta 是句中片段（增量），与用户转写不对称', () => {
+    const byType = new Map(fixtures.map((f) => [f.type, f]));
+    const petDelta = byType.get('response.audio_transcript.delta')?.delta as string;
+    const petFull = byType.get('response.audio_transcript.done')?.transcript as string;
+    assert.equal(typeof petDelta, 'string');
+    assert.ok(petFull.includes(petDelta), 'delta 应当是这句话里的一个片段');
+    // 这就是不对称的地方：她的 delta 要 += ，用户的 delta 要赋值。别统一成一种。
+    assert.ok(petDelta.length < petFull.length);
   });
 
   test('真实事件带了契约里没写的额外字段也不影响解析', () => {
@@ -134,7 +167,6 @@ describe('连接参数', () => {
     const protocols = realtimeSubprotocols('sk-test-123');
     assert.deepEqual(protocols, ['realtime', 'openai-insecure-api-key.sk-test-123']);
   });
-
   test('URL 不带密钥（query param 鉴权会被服务端拒）', () => {
     const url = realtimeUrl();
     assert.ok(url.startsWith('wss://api.stepfun.com/v1/realtime?model='));
@@ -145,6 +177,31 @@ describe('连接参数', () => {
   test('采样率常量是实测值 24000', () => {
     // 由 audio_end_ms 斜率法实测确认，见本轮报告。
     assert.equal(REALTIME_SAMPLE_RATE, 24000);
+  });
+
+  // 按住说话完全依赖这两条，所以把它们钉在契约层面。
+  // 已用真实连接验证（见本轮报告的 ptt-probe）：turn_detection 设 null 之后
+  // 服务端不再发 speech_started/stopped、也不会自己开回合，必须手动
+  // input_audio_buffer.commit + response.create 才走完一轮；而且这个值可以在
+  // 同一个连接上用 session.update 双向热改，不需要重建会话。
+  test('SessionConfig 允许 turn_detection: null（关掉服务端 VAD）', () => {
+    const config: SessionConfig = { turn_detection: null };
+    assert.equal(config.turn_detection, null);
+  });
+
+  test('手动提交这一轮所需的客户端事件都在契约里', () => {
+    const manualTurn: ClientEvent[] = [
+      { type: 'input_audio_buffer.clear' },
+      { type: 'input_audio_buffer.append', audio: 'AAAA' },
+      { type: 'input_audio_buffer.commit' },
+      { type: 'response.create' },
+    ];
+    assert.deepEqual(manualTurn.map((e) => e.type), [
+      'input_audio_buffer.clear',
+      'input_audio_buffer.append',
+      'input_audio_buffer.commit',
+      'response.create',
+    ]);
   });
 });
 

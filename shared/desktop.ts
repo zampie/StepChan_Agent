@@ -123,6 +123,21 @@ export const settingsSchema = z
   .object({
     voice: z.string().default('yuanqishaonv'),
     voiceEnabled: z.boolean().default(true),
+    /** 持续聆听。关掉之后只能长按桌宠说话（按住说、松手发）。 */
+    listening: z.boolean().default(true),
+    /**
+     * 允许用语音打断她。**默认关闭** —— 环境噪声和她自己的回声都会被当成打断，
+     * 关掉之后她会把话说完，想打断就长按或按 Esc。
+     */
+    voiceInterruptible: z.boolean().default(false),
+    /**
+     * 大脑模式。
+     * - realtime：stepaudio-3-realtime，延迟最低，但工具调用能力弱
+     * - chat：走 chat completions 的强模型，更会用工具、更"聪明"，但要多等
+     */
+    brainMode: z.enum(['realtime', 'chat']).default('realtime'),
+    /** chat 模式用哪个模型。 */
+    chatModel: z.enum(['step-5-preview', 'step-3.7-flash']).default('step-5-preview'),
     screenAwareness: z.boolean().default(false),
     appAwareness: z.boolean().default(false),
     clipboardAwareness: z.boolean().default(false),

@@ -62,6 +62,19 @@ export class Brain {
     return this.session?.transcript ?? [];
   }
 
+  /**
+   * 持续聆听是否开着。关着的时候只有长按桌宠才采集音频。
+   * 设置还没读到时按默认值（true）算。
+   */
+  get listening(): boolean {
+    return this.settings?.listening ?? true;
+  }
+
+  /** 语音能不能自动打断她。注意 interrupt() 不受它影响。 */
+  get voiceInterruptible(): boolean {
+    return this.settings?.voiceInterruptible ?? false;
+  }
+
   private async loadSettings(): Promise<Settings> {
     this.settings = await this.desktop.getSettings();
     return this.settings;
@@ -75,18 +88,24 @@ export class Brain {
   /**
    * 开始一次会话。withMic=false 时只建连接不碰麦克风 —— 纯打字模式不该
    * 弹权限对话框。
+   *
+   * 「按住说话」模式（settings.listening=false）也不会在这里开麦：即使调用方
+   * 传了 withMic=true，麦克风权限也要留到用户第一次长按时再申请。
    */
   async start(withMic = true): Promise<void> {
-    if (this.session) {
-      if (withMic) await this.session.enableMic();
-      return;
+    // 并发 start（启动流程 + 托盘 + 热键会同时打过来）只真正跑一次。
+    if (this.starting) {
+      await this.starting;
+    } else if (!this.session) {
+      this.starting = this.doStart(withMic).finally(() => {
+        this.starting = null;
+      });
+      await this.starting;
     }
-    // 并发 start（比如用户快速点两下）只跑一次。
-    if (this.starting) return this.starting;
-    this.starting = this.doStart(withMic).finally(() => {
-      this.starting = null;
-    });
-    return this.starting;
+    // 会话已经在了（或者刚被别的调用方用 withMic=false 起起来）：
+    // 这里补开麦克风，否则「先打字起会话、再从托盘开语音」会一直没麦。
+    // enableMic() 自己会在按住说话模式下拒绝常开麦。
+    if (withMic) await this.session?.enableMic();
   }
 
   private async doStart(withMic: boolean): Promise<void> {
@@ -123,6 +142,9 @@ export class Brain {
       }),
       tools: toolDefinitions,
       executeTool: (name: ToolName, args: unknown) => tools.execute(name, args),
+      // 两个开关的初值。之后用户从托盘改，走 refreshSettings() 热更新。
+      listening: settings.listening,
+      interruptible: settings.voiceInterruptible,
       emit: this.emit,
       textNeedsTool,
       summarize: (entries) => summarizeTranscript(entries),
@@ -160,7 +182,34 @@ export class Brain {
     this.session?.disableMic();
   }
 
-  /** 手动打断（点她一下、按热键）。 */
+  /**
+   * 长按桌宠开始说话。
+   *
+   * - 按住说话模式（settings.listening=false）：这是**唯一**的采集入口。
+   *   麦克风在这里第一次申请权限，松手（endPushToTalk）时提交这一轮。
+   * - 持续聆听模式：长按当「闭嘴，听我说」用 —— 先打断她，断句仍交给服务端 VAD。
+   *
+   * 会话还没起来就先起（不常开麦），这样「启动后第一个动作就是长按」也能用。
+   */
+  async beginPushToTalk(): Promise<void> {
+    if (!this.session) await this.start(false);
+    await this.session?.beginPushToTalk();
+  }
+
+  /** 松手。按住说话模式下这里才真正提交音频并要她回话。 */
+  endPushToTalk(): void {
+    this.session?.endPushToTalk();
+  }
+
+  /** 按住说话进行中（UI 可以据此显示「正在听」）。 */
+  get pushToTalkActive(): boolean {
+    return this.session?.pushToTalkActive ?? false;
+  }
+
+  /**
+   * 手动打断（点她一下、按热键、长按）。
+   * **不受 voiceInterruptible 开关影响** —— 开关只管语音能不能自动打断。
+   */
   interrupt(): void {
     this.session?.interrupt();
   }
@@ -175,18 +224,27 @@ export class Brain {
   }
 
   /**
-   * 设置变了（隐私开关等）→ 重新生成 instructions 推给模型，
-   * 这样她立刻知道自己现在能看什么、不能看什么。
+   * 设置变了（隐私开关、聆听模式、可打断）→ 把新值真正应用到**正在进行的会话**上，
+   * 不是只在建会话时读一次。
+   *
+   * - instructions 重新生成并推下去，这样她立刻知道自己现在能看什么。
+   * - voiceInterruptible 是纯本地行为，立即生效。
+   * - listening 走 session.update 热改 turn_detection（已实测可以双向热改，
+   *   不需要重建会话），并相应开/关麦克风。
    */
   async refreshSettings(): Promise<Settings> {
     const settings = await this.loadSettings();
-    this.session?.setInstructions(
+    const session = this.session;
+    if (!session) return settings;
+    session.setInstructions(
       buildInstructions({
         settings,
         desktopAvailable: this.desktop.available,
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       }),
     );
+    session.setInterruptible(settings.voiceInterruptible);
+    await session.setListening(settings.listening);
     return settings;
   }
 

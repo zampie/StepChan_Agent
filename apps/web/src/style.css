@@ -208,10 +208,42 @@ body {
   font-size: 13px;
   -webkit-user-select: text;
   user-select: text;
+  /* color 必须显式写。input 不继承页面的 color，用的是 UA 默认的黑 ——
+   * 而深色模式下 --paper 是深灰，于是黑字压深底，完全看不见。
+   * -webkit-text-fill-color 一起写：WebKit 下它的优先级高于 color。 */
+  color: var(--ink);
+  -webkit-text-fill-color: var(--ink);
+  caret-color: var(--teal);
+}
+
+.composer input::placeholder {
+  color: var(--ink);
+  -webkit-text-fill-color: var(--ink);
+  opacity: 0.45;
 }
 
 .composer input:focus {
   outline: 2px solid rgba(20, 182, 197, 0.5);
+}
+
+.composer-close {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.composer-close:hover {
+  background: #fff;
+  color: #d8524b;
 }
 
 /* ---- 设置窗口（独立窗口，有边框，不透明） ---- */
@@ -287,6 +319,16 @@ body {
   font: inherit;
 }
 
+/* 同一个坑：下拉框在深色模式下也会黑字压深底。 */
+.settings select {
+  padding: 3px 6px;
+  border: 1px solid #c7d3de;
+  border-radius: 7px;
+  background: #fff;
+  color: #1b2430;
+  -webkit-text-fill-color: #1b2430;
+}
+
 .settings-warn {
   margin: 0 0 10px;
   padding: 8px 10px;
@@ -336,5 +378,11 @@ body {
   }
   .settings-warn {
     background: #4a3a1e;
+  }
+  .settings select {
+    border-color: #3c4854;
+    background: #232c35;
+    color: #e8eff5;
+    -webkit-text-fill-color: #e8eff5;
   }
 }

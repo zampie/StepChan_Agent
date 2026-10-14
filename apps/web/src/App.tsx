@@ -10,33 +10,25 @@
 // 桌面不是聊天窗。
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Awareness } from './awareness';
-import { Brain } from './brain/Brain';
+import { createBrain, type PetBrain } from './brain/chat';
 import { RigRenderer } from './pet';
 import { desktop } from './platform/desktop';
-import hitRegions, { asTouchPart } from './platform/hitRegions';
+import hitRegions from './platform/hitRegions';
 import { reportDiagnostic } from './platform/diagnostics';
 import { Bubble } from './ui/Bubble';
 import { popupPetMenu } from './ui/PetMenu';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
-import type { ActionName, Expression, FxName, Spot, TouchPart } from '../../../shared/pet';
+import type { ActionName, Expression, FxName, Spot } from '../../../shared/pet';
 import type { PetEvent } from '../../../shared/brain';
 
 const RIG_URL = `${import.meta.env.BASE_URL}rig/rig.json`;
 /** petScale = 1 时角色的显示高度（px）。 */
 const BASE_SIZE = 300;
 
-/** 部位被摸到时的即时表现。台词由大脑决定，这里只保证手感上立刻有反馈。 */
-const TOUCH_REACTION: Record<TouchPart, { expression: Expression; fx?: FxName }> = {
-  head: { expression: 'shy', fx: 'heart' },
-  cheek: { expression: 'happy', fx: 'sparkle' },
-  badge: { expression: 'proud', fx: 'sparkle' },
-  hand: { expression: 'curious' },
-};
-
 export function App() {
   const hostRef = useRef<HTMLDivElement>(null);
   const rigRef = useRef<RigRenderer | null>(null);
-  const brainRef = useRef<Brain | null>(null);
+  const brainRef = useRef<PetBrain | null>(null);
   const awarenessRef = useRef<Awareness | null>(null);
   // awareness 的抑制逻辑要读这些状态，但它不该反向依赖 brain/UI，
   // 所以用 ref 当只读探针喂给它。
@@ -45,6 +37,8 @@ export function App() {
   /** composing 的镜像，给事件回调读 —— 回调捕获的 state 是旧值。 */
   const composingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** Rust 命中轮询报的最后一个部位，轻点时用它选反应集合。 */
+  const lastHitPart = useRef<string | null>(null);
 
   const [petText, setPetText] = useState('');
   const [userText, setUserText] = useState('');
@@ -59,6 +53,8 @@ export function App() {
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState('');
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  /** 自增一次就重建大脑（换模式/换模型时用）。 */
+  const [brainGeneration, setBrainGeneration] = useState(0);
 
   // 事件回调（托盘、热键）捕获的是旧 state，所以用 ref 做镜像。
   useEffect(() => {
@@ -110,11 +106,17 @@ export function App() {
   }, []);
 
   // ---- 大脑 ----
+  //
+  // 实例由 createBrain 按 settings.brainMode 决定（realtime 或 chat），两者公开面
+  // 由 PetBrain 约束、并有编译期断言保证一致，所以这里和下面的事件处理都不区分模式。
+  // 换模式 = 换实例（brainGeneration 自增触发本 effect 重跑），因为两种模式的
+  // 上下文权威不在同一边，原地切换要搬上下文 —— 那是混合模式才解决的问题。
   useEffect(() => {
-    const brain = new Brain();
-    brainRef.current = brain;
+    let cancelled = false;
+    let brain: PetBrain | null = null;
+    let unsubscribe: (() => void) | null = null;
 
-    const unsubscribe = brain.on((event: PetEvent) => {
+    const handle = (event: PetEvent) => {
       const rig = rigRef.current;
       switch (event.type) {
         case 'pet_transcript':
@@ -156,6 +158,11 @@ export function App() {
         case 'link':
           setLink(event.url);
           break;
+        case 'notice':
+          // 不是错误，所以用提示气泡（和隐私提示同一条），不配红色告警样式。
+          setNotice(event.message);
+          window.setTimeout(() => setNotice(null), 5000);
+          break;
         case 'connection':
           if (event.state === 'open') setError(null);
           else if (event.state === 'closed' && event.detail) setError(event.detail);
@@ -167,23 +174,29 @@ export function App() {
         default:
           break;
       }
-    });
+    };
 
-    void desktop
-      .getSettings()
-      .then(async (value) => {
-        setSettings(value);
-        applyAppearance(value);
-        if (value.voiceEnabled) await brain.start(true);
-      })
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : '启动失败。'));
+    void (async () => {
+      const value = await desktop.getSettings();
+      if (cancelled) return;
+      setSettings(value);
+      applyAppearance(value);
+      brain = createBrain(value.brainMode);
+      brainRef.current = brain;
+      unsubscribe = brain.on(handle);
+      // 关掉持续聆听时不要在启动就开麦 —— 麦克风权限留到第一次长按再申请。
+      if (value.voiceEnabled) await brain.start(value.listening);
+    })().catch((e: unknown) =>
+      setError(e instanceof Error ? e.message : '启动失败。'),
+    );
 
     return () => {
-      unsubscribe();
+      cancelled = true;
+      unsubscribe?.();
       brainRef.current = null;
-      void brain.dispose();
+      void brain?.dispose();
     };
-  }, [applyAppearance]);
+  }, [applyAppearance, brainGeneration]);
 
   // ---- 主动感知（看应用、接拖放、空闲行动） ----
   // Awareness 只产出意图，由这里决定要不要真的让她开口 —— 它不认识 brain，也不认识渲染器。
@@ -220,19 +233,13 @@ export function App() {
     void desktop.setHitRegions(hitRegions);
   }, []);
 
-  // 被摸到时立刻有反应，不等模型回话。
+  // Rust 的命中轮询只用来**记录**光标压在哪个部位；反应由单击触发。
+  //
+  // 原来是一悬停就换表情，但那样光标路过她身上就会乱变，而且和「每单击一次
+  // 换一个」冲突 —— 悬停反应会把洗牌袋提前消耗掉。
   useEffect(() => {
-    let last = '';
     return desktop.onHitTest((part) => {
-      const key = part ?? '';
-      if (key === last) return;
-      last = key;
-      const touch = asTouchPart(part);
-      if (!touch) return;
-      awarenessRef.current?.notifyInteraction();
-      const reaction = TOUCH_REACTION[touch];
-      rigRef.current?.setExpression(reaction.expression);
-      if (reaction.fx) rigRef.current?.spawnFx(reaction.fx);
+      lastHitPart.current = part;
     });
   }, []);
 
@@ -262,6 +269,47 @@ export function App() {
     // 交还给 Rust 的命中轮询，否则整个窗口会一直吃掉点击、不再穿透。
     void desktop.setInteractive(null).catch(() => {});
   }, []);
+
+  /**
+   * 设置改动的唯一入口（右键菜单、托盘、设置窗都走这里）。
+   *
+   * 哪些改动需要重建语音会话是有依据的，不是保守起见全重建：
+   * - voiceEnabled：从无到有要建会话，从有到无要停。
+   * - voice（音色）：realtime 首次出音后 voice 不可改，只能重建。
+   * - brainMode：换的是整个大脑实现，必须重建。
+   * 其余（聆听模式、是否可打断、缩放、减少动效）都是会话内热生效，
+   * 重建反而会打断正在说的话。
+   */
+  const applySettingsPatch = useCallback(
+    (patch: Partial<Settings>) => {
+      void (async () => {
+        const next = await desktop.setSettings(patch);
+        setSettings(next);
+        applyAppearance(next);
+        const brain = brainRef.current;
+        if (!brain) return;
+
+        if ('voiceEnabled' in patch) {
+          if (next.voiceEnabled) await brain.start(true);
+          else await brain.stop();
+          return;
+        }
+        if ('voice' in patch) {
+          await brain.setVoice(next.voice);
+          return;
+        }
+        if ('brainMode' in patch || 'chatModel' in patch) {
+          // 大脑换实现：由 reloadBrain 负责，这里只标记。
+          setBrainGeneration((n) => n + 1);
+          return;
+        }
+        await brain.refreshSettings();
+      })().catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : '保存设置失败。'),
+      );
+    },
+    [applyAppearance],
+  );
 
   // ---- 托盘、热键、拖放 ----
   const reloadSettings = useCallback(async () => {
@@ -315,34 +363,79 @@ export function App() {
   }, [reloadSettings, openComposer]);
 
   // ---- 文字输入 ----
-  // 拖动：移动超过阈值才交给系统接管。
+  // ---- 指针手势：一条 pointer 流上要同时分辨「轻点 / 长按说话 / 拖动」 ----
   //
-  // 不能在 pointerdown 就调 startDragging —— 系统一接管，pointerup 就不会回到 webview，
-  // 于是「轻点摸头」会全部变成拖动。所以先记起点，等真的拖了几像素再移交。
-  const dragStart = useRef<{ x: number; y: number } | null>(null);
+  // 三者互斥，判定顺序是：先看有没有移动（移动 → 拖动），再看按了多久
+  // （够久 → 长按说话），都不是才算轻点。
+  //
+  // 拖动不能在 pointerdown 就 startDragging：系统一接管，pointerup 就不再回到
+  // webview，于是每次轻点都会变成拖动，「摸头」彻底没了。所以等移动超过阈值再移交。
+  const gesture = useRef<{
+    x: number;
+    y: number;
+    moved: boolean;
+    talking: boolean;
+    timer: number;
+  } | null>(null);
+  /** 移动超过这么多像素就算拖动，不再算点击或长按。 */
   const DRAG_THRESHOLD = 4;
+  /** 按住这么久算长按说话。短于它的按压算轻点。 */
+  const LONG_PRESS_MS = 260;
 
-  const beginDrag = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    dragStart.current = { x: e.clientX, y: e.clientY };
+  /** 收尾：无论是松手、取消还是指针离开，都必须保证麦克风被放掉。 */
+  const finishGesture = useCallback(() => {
+    const g = gesture.current;
+    gesture.current = null;
+    if (!g) return;
+    window.clearTimeout(g.timer);
+    rigRef.current?.setDragging(false);
+    if (g.talking) {
+      // 长按结束 → 提交这一轮（Brain 内部会判断是不是太短而丢弃）。
+      brainRef.current?.endPushToTalk();
+      return;
+    }
+    if (!g.moved) {
+      // 轻点：换一个表情/动作/特效。渲染器自己保证不连续重复。
+      rigRef.current?.reactToTap(lastHitPart.current);
+      awarenessRef.current?.notifyInteraction();
+    }
   }, []);
 
-  const maybeDrag = useCallback((e: React.PointerEvent) => {
-    const start = dragStart.current;
-    if (!start) return;
-    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_THRESHOLD) return;
-    dragStart.current = null;
+  const beginGesture = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      // 关掉持续聆听时，长按 = 按住说话；开着时长按没有特殊含义。
+      const pushToTalk = !settings.listening && settings.voiceEnabled;
+      const timer = pushToTalk
+        ? window.setTimeout(() => {
+            const g = gesture.current;
+            if (!g || g.moved) return;
+            g.talking = true;
+            void brainRef.current?.beginPushToTalk().catch((err: unknown) =>
+              setError(err instanceof Error ? err.message : '麦克风打不开。'),
+            );
+          }, LONG_PRESS_MS)
+        : 0;
+      gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer };
+    },
+    [settings.listening, settings.voiceEnabled],
+  );
+
+  const moveGesture = useCallback((e: React.PointerEvent) => {
+    const g = gesture.current;
+    if (!g || g.moved) return;
+    if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < DRAG_THRESHOLD) return;
+    g.moved = true;
+    window.clearTimeout(g.timer);
+    // 已经在说话了就不抢成拖动 —— 说话中轻微手抖不该把她拖走。
+    if (g.talking) return;
+    gesture.current = null;
     rigRef.current?.setDragging(true);
     awarenessRef.current?.notifyInteraction();
     void desktop.startDragging().catch(() => {});
-    // 系统接管后收不到 pointerup，所以这里立刻把拖拽表现收掉，
-    // 不然挤压拉伸会一直停在拖拽姿态。
-    window.setTimeout(() => rigRef.current?.setDragging(false), 120);
-  }, []);
-
-  const endDrag = useCallback(() => {
-    dragStart.current = null;
-    rigRef.current?.setDragging(false);
+    // 系统接管后收不到 pointerup，所以这里就把拖拽表现收掉，
+    // 否则悬挂姿态会一直停在那儿。
+    window.setTimeout(() => rigRef.current?.setDragging(false), 140);
   }, []);
 
   const send = useCallback(() => {
@@ -365,16 +458,7 @@ export function App() {
           e.preventDefault();
           void popupPetMenu(settings, {
             onType: openComposer,
-            onToggleVoice: (next) => {
-              void (async () => {
-                await desktop.setSettings({ voiceEnabled: next });
-                const brain = brainRef.current;
-                if (!brain) return;
-                if (next) await brain.start(true);
-                else await brain.stop();
-                await reloadSettings();
-              })().catch(() => {});
-            },
+            onPatchSettings: applySettingsPatch,
             onOpenSettings: () => void desktop.openSettings().catch(() => {}),
             onMoveAside: () => void desktop.moveToSpot('bottom_right').catch(() => {}),
             onQuit: () => void desktop.quit().catch(() => {}),
@@ -383,12 +467,15 @@ export function App() {
             if (!shown) openComposer();
           });
         }}
-        // 双击 = 打字。
-        onDoubleClick={() => openComposer()}
-        onPointerDown={beginDrag}
-        onPointerMove={maybeDrag}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
+        // 双击 = 开/关输入框。
+        onDoubleClick={() => (composingRef.current ? closeComposer() : openComposer())}
+        onPointerDown={beginGesture}
+        onPointerMove={moveGesture}
+        onPointerUp={finishGesture}
+        // pointercancel / pointerleave 也必须收尾，否则麦克风不放、
+        // 系统的录音指示灯一直亮着。
+        onPointerCancel={finishGesture}
+        onPointerLeave={finishGesture}
       />
       <Bubble
         petText={petText}
@@ -417,9 +504,23 @@ export function App() {
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();
-              if (e.key === 'Escape') closeComposer();
+              if (e.key === 'Escape') {
+                // 不可打断模式下，Esc 是用户唯一的「闭嘴」手段。
+                brainRef.current?.interrupt();
+                closeComposer();
+              }
             }}
           />
+          {/* 三种关法都给：× 最直观，Esc 给键盘用户，再双击一次和打开的手势对称。 */}
+          <button
+            type="button"
+            className="composer-close"
+            aria-label="关闭输入框"
+            title="关闭（Esc）"
+            onClick={closeComposer}
+          >
+            ×
+          </button>
         </div>
       )}
     </>

@@ -100,6 +100,77 @@ export function SettingsView() {
       </section>
 
       <section>
+        <h2>怎么听</h2>
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={settings.listening}
+            onChange={(e) => void update({ listening: e.target.checked })}
+          />
+          <span>持续聆听</span>
+        </label>
+        <p className="hint">
+          关掉之后她不会一直开着麦克风，只在你<strong>长按她</strong>的时候听 ——
+          环境噪声就完全进不来了。
+        </p>
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={settings.voiceInterruptible}
+            onChange={(e) => void update({ voiceInterruptible: e.target.checked })}
+          />
+          <span>允许说话打断她</span>
+        </label>
+        <p className="hint">
+          默认关闭。开着的话，环境噪声和她自己从扬声器出来的声音都可能被当成打断。
+          关闭时想让她停下，按 Esc 或长按她。
+        </p>
+      </section>
+
+      <section>
+        <h2>大脑</h2>
+        <label className="row">
+          <input
+            type="radio"
+            name="brainMode"
+            checked={settings.brainMode === 'realtime'}
+            onChange={() => void update({ brainMode: 'realtime' })}
+          />
+          <span>反应优先</span>
+        </label>
+        <p className="hint">
+          实时语音模型，说完到出声约 0.2 秒。代价是工具调用不太可靠 ——
+          有时会嘴上答应却没真去做（已经做了兜底，但不是百分百）。
+        </p>
+        <label className="row">
+          <input
+            type="radio"
+            name="brainMode"
+            checked={settings.brainMode === 'chat'}
+            onChange={() => void update({ brainMode: 'chat' })}
+          />
+          <span>聪明优先</span>
+        </label>
+        <p className="hint">
+          走强模型，更会主动看屏幕、用工具、把事办成，但要多等一会儿。
+        </p>
+        {settings.brainMode === 'chat' && (
+          <label className="row">
+            <span>模型</span>
+            <select
+              value={settings.chatModel}
+              onChange={(e) =>
+                void update({ chatModel: e.target.value as Settings['chatModel'] })
+              }
+            >
+              <option value="step-5-preview">step-5-preview（更聪明）</option>
+              <option value="step-3.7-flash">step-3.7-flash（更快）</option>
+            </select>
+          </label>
+        )}
+      </section>
+
+      <section>
         <h2>她能感知什么</h2>
         <p className="hint">以下全部默认关闭。开启后她才会用到，且每次使用都有可见提示。</p>
         {PRIVACY.map((item) => (

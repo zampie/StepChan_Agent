@@ -9,6 +9,17 @@ export {
   type LoadedRig,
 } from './rigManifest';
 export {
+  logoManifestSchema,
+  logoSlots,
+  logoManifestFile,
+  logoUrlFor,
+  parseLogoManifest,
+  type LoadedLogo,
+  type LogoManifest,
+  type LogoPlacement,
+  type LogoSlot,
+} from './logoManifest';
+export {
   VisemeTracker,
   audioVisemeLadder,
   audioDrivenVisemes,
@@ -17,12 +28,28 @@ export {
 } from './visemeMap';
 export {
   BlinkScheduler,
+  ShuffleBag,
   Spring,
   breathe,
+  clawFeel,
+  clawPose,
+  sagTarget,
+  swingTarget,
   sway,
   squash,
   fxPose,
   easeInOut,
   crossfadeMs,
   type BlinkOptions,
+  type ClawFeel,
+  type ClawInput,
+  type ClawPose,
 } from './motion';
+export {
+  tapPools,
+  tapTargets,
+  tapTargetOf,
+  tapActionHoldMs,
+  type TapReaction,
+  type TapTarget,
+} from './tapReactions';

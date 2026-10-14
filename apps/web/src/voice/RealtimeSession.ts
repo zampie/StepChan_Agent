@@ -29,6 +29,16 @@ export const MAX_TOOL_CALLS_PER_TURN = 4;
 const ROTATE_MARGIN_MS = 90_000;
 /** 文字输入后，等多久判定「她答应了却没真的调工具」。 */
 const TOOL_NUDGE_DELAY_MS = 1200;
+/**
+ * 一次长按至少要采到这么多帧（一帧约 40ms，见 MicStream 的 frameSamples）才算
+ * 「说了话」。
+ *
+ * 为什么要这个下限：**实测**空缓冲区上 commit 会让服务端回两个 error
+ * （`input_audio_buffer.append is not called` 外加一个 500 级的内部错误），
+ * 用户看到的就是莫名其妙的「语音服务返回了一个错误」。误触的极短长按
+ * （手指刚碰到就挪开）正好会走到这条路上，所以干脆不提交，清掉算了。
+ */
+export const MIN_PUSH_TO_TALK_FRAMES = 4;
 
 export type ToolExecutor = (name: ToolName, args: unknown) => Promise<ToolResult>;
 
@@ -39,6 +49,19 @@ export type RealtimeSessionOptions = {
   instructions: string;
   tools: ToolDefinition[];
   executeTool: ToolExecutor;
+  /**
+   * 持续聆听。默认 true。
+   * - true：持续开麦 + 服务端 VAD 断句。
+   * - false：**不持续开麦**，只在 beginPushToTalk()/endPushToTalk() 之间采集，
+   *   并且把 turn_detection 设成 null（否则 VAD 会在中途把一句话截断）。
+   */
+  listening?: boolean;
+  /**
+   * 允许用语音打断她。默认 false。
+   * 关闭时她说话期间的 VAD 事件被**完全忽略** —— 连压音量都不做，
+   * 因为环境噪声和她自己的回声都会触发 VAD。
+   */
+  interruptible?: boolean;
   /** 发事件给 UI。 */
   emit: (event: PetEvent) => void;
   /**
@@ -88,6 +111,18 @@ export class RealtimeSession {
   /** 已压音量、等待确认是不是真人声的状态。 */
   private pendingBargeIn = false;
   private bargeInTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 本次 VAD 回合被「不可打断」规则忽略了。
+   *
+   * speech_started 被忽略时置位，speech_stopped 时清掉 —— 这样一对事件要么
+   * 一起处理、要么一起忽略，不会出现「开口被忽略、闭口却把活动状态改成 thinking」
+   * 这种半截状态（她明明还在说话，UI 却显示在思考）。
+   */
+  private vadIgnored = false;
+  /** 按住说话进行中。 */
+  private pttActive = false;
+  /** 本次长按已经送出去多少帧音频。见 MIN_PUSH_TO_TALK_FRAMES。 */
+  private pttFrames = 0;
 
   private userPartial = '';
   private petPartial = '';
@@ -104,7 +139,10 @@ export class RealtimeSession {
       onError: (message) => this.options.emit({ type: 'error', message }),
     });
     this.mic = new MicStream({
-      onFrame: (base64) => this.send({ type: 'input_audio_buffer.append', audio: base64 }),
+      onFrame: (base64) => {
+        if (this.pttActive) this.pttFrames++;
+        this.send({ type: 'input_audio_buffer.append', audio: base64 });
+      },
       onError: (message) => this.options.emit({ type: 'error', message }),
       onSampleRateMismatch: (actual, target) =>
         console.warn(`[RealtimeSession] 麦克风采样率 ${actual}Hz ≠ ${target}Hz，已重采样。`),
@@ -119,16 +157,43 @@ export class RealtimeSession {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  /** 建立会话。withMic=false 用于纯打字模式（不碰麦克风权限）。 */
+  /** 持续聆听开关的当前值（默认 true）。 */
+  get listening(): boolean {
+    return this.options.listening !== false;
+  }
+
+  /** 可打断开关的当前值（默认 false）。 */
+  get interruptible(): boolean {
+    return this.options.interruptible === true;
+  }
+
+  /** 按住说话进行中。 */
+  get pushToTalkActive(): boolean {
+    return this.pttActive;
+  }
+
+  /** 她此刻正在出声（还有未播完的音频，或者这一轮还没结束）。 */
+  private get speaking(): boolean {
+    return this.responseActive || this.speech.audioLevel > 0;
+  }
+
+  /**
+   * 建立会话。withMic=false 用于纯打字模式，以及「按住说话」模式
+   * （两者都不该在启动时就申请麦克风权限）。
+   */
   async start(withMic: boolean): Promise<void> {
     this.started = true;
-    this.micWanted = withMic;
+    // 按住说话模式下不持续开麦：麦克风权限留到用户第一次长按时再申请。
+    const continuous = withMic && this.listening;
+    this.micWanted = continuous;
     await this.speech.start();
     await this.connect(false);
-    if (withMic) await this.enableMic();
+    if (continuous) await this.enableMic();
   }
 
   async enableMic(): Promise<void> {
+    // 按住说话模式下不能常开麦 —— 开了就违背「不持续开麦」这个承诺。
+    if (!this.listening) return;
     this.micWanted = true;
     if (!this.started) return;
     try {
@@ -142,8 +207,120 @@ export class RealtimeSession {
 
   disableMic(): void {
     this.micWanted = false;
+    this.pttActive = false;
     this.mic.stop();
     this.setActivity('idle');
+  }
+
+  // ---- 两个运行时开关 ----
+
+  /**
+   * 切换「可打断」。纯本地行为，不需要动会话配置 ——
+   * 服务端 VAD 照常跑（她没说话时还要靠它开新回合），只是播放期间我们不理它。
+   */
+  setInterruptible(interruptible: boolean): void {
+    if (interruptible === this.interruptible) return;
+    this.options = { ...this.options, interruptible };
+    // 关掉开关的瞬间可能正压着音量等确认，立刻恢复，别让她一直小声说。
+    if (!interruptible && this.pendingBargeIn) this.cancelBargeIn();
+  }
+
+  /**
+   * 切换「持续聆听」。
+   *
+   * 不重建会话：**已实测** turn_detection 能在同一连接上用 session.update
+   * 双向热改（null ↔ server_vad，改完立刻生效），见本轮的 ptt-probe 结果。
+   */
+  async setListening(listening: boolean): Promise<void> {
+    if (listening === this.listening) return;
+    // 正按着说话就先把这一轮收掉，否则 VAD 配置变了之后这段音频没人提交。
+    if (this.pttActive) this.endPushToTalk();
+    this.options = { ...this.options, listening };
+    if (!this.started) return;
+    // 先推配置再动麦克风：VAD 还开着的时候松开的麦会留下半截 buffer。
+    if (this.connected) this.sendSessionUpdate(false);
+    if (listening) {
+      await this.enableMic();
+    } else {
+      this.micWanted = false;
+      this.mic.stop();
+      // 她可能正在说话，这时不该把活动状态抹成 idle。
+      if (!this.speaking) this.setActivity('idle');
+    }
+  }
+
+  // ---- 按住说话 ----
+
+  /**
+   * 长按桌宠开始说话。
+   *
+   * 持续聆听模式下长按只当「闭嘴，听我说」用 —— 麦克风本来就开着，断句交给 VAD。
+   * 按住说话模式下才真的现开麦克风：**麦克风权限就是在这里第一次申请的**，
+   * 应用启动时不碰。
+   */
+  async beginPushToTalk(): Promise<void> {
+    if (!this.started) return;
+    // 长按是用户明确的意思表示，所以无论「可打断」开关如何都先让她停下。
+    this.interrupt();
+    if (this.listening) {
+      // 麦克风已经开着，让服务端 VAD 继续断句，不要手动接管。
+      this.setActivity('listening');
+      return;
+    }
+    if (this.pttActive) return;
+    this.pttActive = true;
+    this.pttFrames = 0;
+    // 上一次松手可能留下了没提交的尾巴（比如松手时连接刚断），先清干净。
+    this.send({ type: 'input_audio_buffer.clear' });
+    this.micWanted = true;
+    try {
+      await this.mic.start();
+    } catch {
+      // 权限被拒之类：错误已经通过 onError 发出去了，退回纯打字。
+      this.pttActive = false;
+      this.micWanted = false;
+      this.setActivity('idle');
+      return;
+    }
+    // start() 期间用户可能已经松手了。
+    if (!this.pttActive) {
+      this.micWanted = false;
+      this.mic.stop();
+      return;
+    }
+    this.setActivity('listening');
+  }
+
+  /**
+   * 松手 = 这一轮说完了。
+   *
+   * VAD 关着的时候**必须手动提交**，否则这段音频永远不会变成一个回合
+   * （已实测：turn_detection: null 下服务端不会自己 commit、也不会自己开回合）。
+   */
+  endPushToTalk(): void {
+    if (!this.pttActive) return;
+    this.pttActive = false;
+    if (this.listening) return; // 连续模式下这只是个手势，没有缓冲区要收
+    this.micWanted = false;
+    this.mic.stop();
+    const frames = this.pttFrames;
+    this.pttFrames = 0;
+    if (frames < MIN_PUSH_TO_TALK_FRAMES) {
+      // 误触：没采到够长的音频就提交，服务端会回两个 error（实测）。
+      // 什么都不问比弹一个看不懂的错误好。
+      console.info(`[RealtimeSession] 长按太短（${frames} 帧），当误触丢掉。`);
+      this.send({ type: 'input_audio_buffer.clear' });
+      this.setActivity('idle');
+      return;
+    }
+    const committed = this.send({ type: 'input_audio_buffer.commit' });
+    if (!committed) {
+      // 连接断了：这段话丢了，但不能把 UI 卡在 listening 上。
+      this.setActivity('idle');
+      return;
+    }
+    this.send({ type: 'response.create' });
+    this.setActivity('thinking');
   }
 
   private setActivity(value: 'idle' | 'listening' | 'thinking' | 'speaking'): void {
@@ -253,17 +430,24 @@ export class RealtimeSession {
       voice: this.options.voice,
       input_audio_format: 'pcm16',
       output_audio_format: 'pcm16',
-      turn_detection: {
-        type: 'server_vad',
-        // 文档默认值在桌宠场景下不可用：silence_duration_ms 默认 **100ms**，
-        // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合；
-        // energy_awakeness_threshold 默认 2500（范围 0–5000）在室内环境下偏低，
-        // 键盘声、风扇、远处人声都能把她唤起来，噪声全进了对话。
-        // 这里按「一句话说完再回」调：停顿容忍到 700ms，能量门限抬到 3400。
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
-        energy_awakeness_threshold: 3400,
-      },
+      turn_detection: this.listening
+        ? {
+            type: 'server_vad',
+            // 文档默认值在桌宠场景下不可用：silence_duration_ms 默认 **100ms**，
+            // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合；
+            // energy_awakeness_threshold 默认 2500（范围 0–5000）在室内环境下偏低，
+            // 键盘声、风扇、远处人声都能把她唤起来，噪声全进了对话。
+            // 这里按「一句话说完再回」调：停顿容忍到 700ms，能量门限抬到 3400。
+            prefix_padding_ms: 300,
+            silence_duration_ms: 700,
+            energy_awakeness_threshold: 3400,
+          }
+        : // 按住说话：服务端 VAD 必须关掉，否则它会在用户还按着的时候
+          // 按停顿把一句话截成好几个回合。关掉之后断句完全由长按手势决定，
+          // 松手时手动 commit + response.create。
+          // 实测：null 会被接受（服务端回显 turn_detection:{"type":""}），
+          // 之后不再有 speech_started/stopped，也不会自己开回合。
+          null,
       input_audio_transcription: {
         model: 'stepaudio-3-asr-max',
         language: 'zh',
@@ -402,7 +586,7 @@ export class RealtimeSession {
   private beginBargeIn(): void {
     if (this.pendingBargeIn) return;
     // 她本来就没在说话，没什么要打断的，直接当新回合。
-    if (!this.responseActive && this.speech.audioLevel <= 0) {
+    if (!this.speaking) {
       this.interrupt();
       return;
     }
@@ -416,6 +600,8 @@ export class RealtimeSession {
 
   /** 确认是真人声 → 执行不可逆的打断。 */
   private confirmBargeIn(): void {
+    // pendingBargeIn 只在「可打断」开着时才会被置位，所以这里天然不会在
+    // 开关关闭时打断她。
     if (!this.pendingBargeIn) return;
     this.interrupt();
   }
@@ -428,8 +614,15 @@ export class RealtimeSession {
     else this.setActivity('idle');
   }
 
+  /**
+   * 打断。**不受 voiceInterruptible 开关影响** —— 那个开关只管「语音能不能
+   * 自动打断」，这是用户明确的动作（Esc、长按、开始打字），永远有效。
+   */
   interrupt(): void {
     this.cancelBargeInTimer();
+    // 这一刀之后 VAD 的忽略状态应当作废：她不说话了，后面的 speech_stopped
+    // 要走正常流程（切 thinking），不能继续被当成「被忽略的那一回合」。
+    this.vadIgnored = false;
     const hadAudio = this.speech.audioLevel > 0 || this.responseActive;
     this.speech.flush();
     this.speech.unduck();
@@ -498,6 +691,15 @@ export class RealtimeSession {
 
       // ---- 打断：headline feature ----
       case 'input_audio_buffer.speech_started': {
+        // 「可打断」关着的时候，她说话期间的 VAD 事件被完全忽略 —— 连压音量都不做。
+        // 这不是偷懒：环境噪声和她自己从扬声器出来的声音都会触发 VAD，
+        // 压一下音量再恢复听上去就是她说话一卡一卡的。想打断就长按或按 Esc
+        // （走 interrupt()，不受这个开关影响）。
+        // 注意只在「她正在说话」时忽略 —— 她没说话时这就是正常的新回合开始，必须照常处理。
+        if (!this.interruptible && this.speaking) {
+          this.vadIgnored = true;
+          return;
+        }
         // 不立刻打断 —— 打断是不可逆的（flush + response.cancel 砍掉的音频回不来），
         // 而 VAD 会被咳嗽、键盘、关门声误触发。先压音量：听觉上已经是「她让你说」，
         // 再等确认（听到实际转写，或者人声持续超过 BARGE_CONFIRM_MS）才真打断。
@@ -508,6 +710,12 @@ export class RealtimeSession {
         return;
       }
       case 'input_audio_buffer.speech_stopped': {
+        // 开口那一下被忽略了，闭口也要一起忽略，否则活动状态会被改成 thinking
+        // （她明明还在说话）。
+        if (this.vadIgnored) {
+          this.vadIgnored = false;
+          return;
+        }
         // 还没确认就结束了 → 判定为误触发，恢复音量、让她接着说。
         if (this.pendingBargeIn) {
           this.cancelBargeIn();
@@ -519,7 +727,13 @@ export class RealtimeSession {
 
       // ---- 字幕 ----
       case 'conversation.item.input_audio_transcription.delta': {
-        this.userPartial += event.delta ?? '';
+        // **赋值，不是累加。** 实测这个事件送的是「累计全量文本」而不是增量：
+        //   你好呀。 / 你好呀，我 / 你好呀，我今天 / ...
+        // 用 += 拼接会得到「你好呀。你好呀，我你好呀，我今天…」——
+        // 用户看到的就是「一句话重复好几遍」。
+        // 注意这与 OpenAI Realtime 的惯例相反，也与她自己的
+        // response.audio_transcript.delta 不一致（那个确实是增量，已实测）。
+        this.userPartial = event.delta ?? this.userPartial;
         // 听到实际内容 = 确认是人在说话，这时才执行不可逆的打断。
         if (this.userPartial.trim()) this.confirmBargeIn();
         this.options.emit({ type: 'user_transcript', text: this.userPartial, final: false });

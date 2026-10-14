@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { inflateSync } from 'node:zlib';
-import { availableActions, isNoopAction } from '../apps/web/src/pet';
+import { availableActions, isNoopAction, logoSlots, parseLogoManifest } from '../apps/web/src/pet';
 import {
   actions,
   browStates,
@@ -338,3 +338,149 @@ test('tools/art 的 alpha / chroma helper 合成输入自测', (t) => {
   assert.equal(r.status, 0, `tools/art/selftest.py 失败：\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /0 条失败/, `自测输出不符合预期：\n${r.stdout}`);
 });
+
+// ---------------------------------------------------------------------------
+// StepFun logo 图层（sidecar 清单 logo.json，见 apps/web/src/pet/logoManifest.ts 顶部）
+//
+// 和 rig.json 同一套要求：结构过 schema、文件真的在、sha256 和尺寸没被换掉、
+// 没有光晕、已同步到 public。另外多两条只属于 logo 的：
+//   - 覆盖半径：直径必须盖得住实测的旧假徽章，否则 220 px 下会露出一圈灰边；
+//   - 与真 SVG 渲染器的形状一致性：qlmanage 渲同一份 SVG，深层错判必须 ≈0。
+// ---------------------------------------------------------------------------
+
+const logoPath = path.join(rigDir, 'logo.json');
+const logo = parseLogoManifest(JSON.parse(readFileSync(logoPath, 'utf8')));
+
+test('logo.json 通过 schema，且画布与 rig.json 一致', () => {
+  assert.equal(logo.manifest.canvas.width, manifest.canvas.width);
+  assert.equal(logo.manifest.canvas.height, manifest.canvas.height);
+  assert.ok(logo.manifest.version.length > 0);
+});
+
+test('logo 贴图存在，sha256 与尺寸都与声明一致', () => {
+  const a = logo.manifest.asset;
+  const abs = path.join(rigDir, a.file);
+  assert.ok(existsSync(abs), `logo 引用的 ${a.file} 不存在`);
+  assert.equal(sha256(a.file), a.sha256, 'logo 贴图被改过但 logo.json 没重建');
+  const { width, height } = pngSize(abs);
+  assert.deepEqual({ width, height }, { width: a.width, height: a.height });
+  assert.equal(width, height, 'logo 贴图必须是正方形（placement 用直径定位）');
+});
+
+test('logo 贴图的分辨率足够喂运行期尺寸（retina + 放大桌宠）', () => {
+  // 桌宠最大 400 px、画布 512 → 最大显示倍率 400/512；再乘 dpr 2。
+  // 贴图短边必须大于「最大 placement 直径 × 这个倍率」才不会糊。
+  const maxSize = Math.max(...logoSlots.map((s) => logo.manifest.placements[s]!.size));
+  const needed = Math.ceil(maxSize * (400 / logo.manifest.canvas.height) * 2);
+  assert.ok(
+    logo.manifest.asset.width >= needed,
+    `logo 贴图 ${logo.manifest.asset.width} px 小于所需的 ${needed} px`,
+  );
+});
+
+test('每个 placement 都盖得住实测的旧假徽章（这是「覆盖得住」的硬条件）', () => {
+  for (const slot of logoSlots) {
+    const p = logo.manifest.placements[slot];
+    assert.ok(p, `缺少 ${slot} 的 placement`);
+    assert.ok(p.coverRadius > 0, `${slot} 的 coverRadius 是 0 —— 没量过旧徽章`);
+    assert.ok(
+      p.size / 2 >= p.coverRadius,
+      `${slot} 直径 ${p.size} 盖不住实测半径 ${p.coverRadius}`,
+    );
+    // 太大也不行：圆盘比旧徽章大一倍就成了另一个设计，而不是「替换徽章」。
+    assert.ok(p.size / 2 < p.coverRadius * 1.6, `${slot} 的 logo 比旧徽章大太多（${p.size}）`);
+  }
+});
+
+test('placement 落在画布内', () => {
+  const { width, height } = logo.manifest.canvas;
+  for (const slot of logoSlots) {
+    const p = logo.manifest.placements[slot]!;
+    const r = p.size / 2;
+    assert.ok(p.cx - r >= 0 && p.cx + r <= width, `${slot} 横向越界`);
+    assert.ok(p.cy - r >= 0 && p.cy + r <= height, `${slot} 纵向越界`);
+  }
+});
+
+test('logo 的位置只声明在 idle 画幅成立的动作上，且这条限制写进了 degraded', () => {
+  // 换姿势的动作图上徽章挪位了，位置对不上。声明成「对所有动作都成立」就是在撒谎。
+  assert.ok(logo.appliesTo.has('idle'), 'idle 必须在 appliesTo 里');
+  for (const name of actions) {
+    if (name === 'idle' || name === 'tilt') continue;
+    assert.ok(!logo.appliesTo.has(name), `${name} 换了姿势，logo 位置不该声明对它成立`);
+  }
+  assert.ok(
+    logo.manifest.degraded.some((d) => d.name === 'logo.nonIdleActions'),
+    '「只在部分动作下显示」是降级，必须出现在 degraded 里',
+  );
+  for (const d of logo.manifest.degraded) {
+    assert.ok(d.reason.length > 5, `${d.name} 的降级原因太短：${d.reason}`);
+  }
+});
+
+test('logo 的来源可追溯：源 SVG 在仓库里、sha256 对得上、留了原始文件出处', () => {
+  const svg = path.join(rigDir, logo.manifest.source.svg);
+  assert.ok(existsSync(svg), `源 SVG ${logo.manifest.source.svg} 不在仓库里`);
+  assert.equal(
+    createHash('sha256').update(readFileSync(svg)).digest('hex'),
+    logo.manifest.source.svgSha256,
+    '源 SVG 被改过但 logo.json 没重建',
+  );
+  const text = readFileSync(svg, 'utf8');
+  // 必须只剩图标那一条 path —— "StepFun" 字样有 7 条，留着就说明抽取没做干净。
+  assert.equal((text.match(/<path\b/g) ?? []).length, 1, '源 SVG 里不止一条 path');
+  assert.match(logo.manifest.source.origin, /sha256=[0-9a-f]{64}/, '没记录原始文件的 sha256');
+  assert.match(logo.manifest.source.origin, /path=1\/8/, '没记录「取第 1 条、共 8 条」');
+});
+
+test('栅格化产物与真 SVG 渲染器形状一致（深层错判 ≈ 0）', () => {
+  const f = logo.manifest.source.fidelity;
+  // null 表示本机没有可用的 SVG 渲染器。允许，但必须显式为 null（「没比过」要可见）。
+  if (f === null) return;
+  assert.ok(f.iou > 0.95, `与 SVG 渲染器的 IoU 只有 ${f.iou}`);
+  // 总差异里绝大部分是 1 px 的抗锯齿边；真正说明形状画错的是深层错判。
+  assert.ok(
+    f.deepMismatchPixels < f.mismatchPixels * 0.1,
+    `深层错判 ${f.deepMismatchPixels} px 占总差异 ${f.mismatchPixels} px 太多 —— 形状可能真的不一样`,
+  );
+});
+
+test('logo 贴图没有淡光晕，且有真正不透明的像素', () => {
+  const alpha = pngAlpha(path.join(rigDir, logo.manifest.asset.file));
+  let halo = 0;
+  let full = 0;
+  for (const v of alpha) {
+    if (v > 0 && v < 16) halo += 1;
+    if (v === 255) full += 1;
+  }
+  assert.equal(halo, 0, `logo 还有 ${halo} 个 a<16 的光晕像素`);
+  assert.ok(full > 0, 'logo 一个 alpha=255 的像素都没有');
+});
+
+test('logo 的阶梯方块是不透明的，不是镂空 —— 镂空会漏出下面的假徽章', () => {
+  // 圆心附近（阶梯方块所在区域）必须全不透明。只检查内切正方形，避开圆的边缘。
+  const { width } = logo.manifest.asset;
+  const alpha = pngAlpha(path.join(rigDir, logo.manifest.asset.file));
+  const lo = Math.round(width * 0.25);
+  const hi = Math.round(width * 0.75);
+  let transparent = 0;
+  for (let y = lo; y < hi; y++) {
+    for (let x = lo; x < hi; x++) if (alpha[y * width + x] < 255) transparent += 1;
+  }
+  assert.equal(transparent, 0, `圆盘内部有 ${transparent} 个非不透明像素 —— 阶梯是镂空的`);
+});
+
+test('logo 的运行期副本已同步到 vite 的 public 目录', () => {
+  const pub = path.join(root, 'apps/web/public/rig');
+  assert.ok(existsSync(path.join(pub, 'logo.json')), 'public/rig 下缺 logo.json —— 跑 npm run sync-rig');
+  assert.ok(
+    existsSync(path.join(pub, logo.manifest.asset.file)),
+    `public/rig 下缺 ${logo.manifest.asset.file}`,
+  );
+  // 源 SVG 不该进构建产物：它是生成源头的留痕，运行期用不到。
+  assert.ok(
+    !existsSync(path.join(pub, logo.manifest.source.svg)),
+    '源 SVG 被同步进了 public —— 它只是留痕，不该进构建产物',
+  );
+});
+
