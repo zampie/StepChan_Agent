@@ -52,6 +52,7 @@ pub fn run() {
             hittest::set_hit_regions,
             hittest::set_interactive,
             window::move_to_spot,
+            window::focus_pet,
             window::get_work_area,
             os::capture_screen,
             os::screen_permission_status,

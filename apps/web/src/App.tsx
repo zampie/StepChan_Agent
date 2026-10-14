@@ -8,7 +8,7 @@
 //
 // 窗口是透明无边框的，界面只有「角色 + 气泡 + 偶尔出现的输入框」，没有聊天记录面板 ——
 // 桌面不是聊天窗。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Awareness } from './awareness';
 import { Brain } from './brain/Brain';
 import { RigRenderer } from './pet';
@@ -112,8 +112,9 @@ export function App() {
           break;
         case 'user_transcript':
           setUserText(event.final ? '' : event.text);
-          // 用户一开口就收掉上一句气泡，免得两个人的话叠在一起。
-          if (event.text) setPetText('');
+          // 只有听清了实际内容才收掉她的气泡。原来是「有任何转写就清」，
+          // 于是一点环境噪声产生的半个字也会把她刚说的话瞬间抹掉 —— 看起来就是「一闪而过」。
+          if (event.text.trim().length >= 2) setPetText('');
           break;
         case 'thinking':
           setThinking(true);
@@ -223,6 +224,14 @@ export function App() {
     });
   }, []);
 
+  /** 打开输入框。必须同时激活应用：Accessory 策略下窗口不会自动成为 key window，
+   *  不激活的话输入框根本点不中、也打不进字。 */
+  const openComposer = useCallback(() => {
+    setComposing(true);
+    awarenessRef.current?.notifyInteraction();
+    void desktop.focusPet().catch(() => {});
+  }, []);
+
   // ---- 托盘、热键、拖放 ----
   const reloadSettings = useCallback(async () => {
     const next = await desktop.getSettings();
@@ -241,7 +250,7 @@ export function App() {
         const brain = brainRef.current;
         if (!brain) return;
         if (command === 'talk') {
-          setComposing(true);
+          openComposer();
           if (!brain.running) await brain.start(true);
         } else if (command === 'voice') {
           if (next.voiceEnabled) await brain.start(true);
@@ -254,8 +263,11 @@ export function App() {
     });
 
     const offHotkey = desktop.onHotkey(() => {
-      awarenessRef.current?.notifyInteraction();
-      setComposing((on) => !on);
+      setComposing((on) => {
+        if (on) return false;
+        openComposer();
+        return true;
+      });
       if (!brainRef.current?.running) void brainRef.current?.start(true).catch(fail);
     });
 
@@ -272,9 +284,39 @@ export function App() {
       offHotkey();
       offDrop();
     };
-  }, [reloadSettings]);
+  }, [reloadSettings, openComposer]);
 
   // ---- 文字输入 ----
+  // 拖动：移动超过阈值才交给系统接管。
+  //
+  // 不能在 pointerdown 就调 startDragging —— 系统一接管，pointerup 就不会回到 webview，
+  // 于是「轻点摸头」会全部变成拖动。所以先记起点，等真的拖了几像素再移交。
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
+  const DRAG_THRESHOLD = 4;
+
+  const beginDrag = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    dragStart.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
+  const maybeDrag = useCallback((e: React.PointerEvent) => {
+    const start = dragStart.current;
+    if (!start) return;
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_THRESHOLD) return;
+    dragStart.current = null;
+    rigRef.current?.setDragging(true);
+    awarenessRef.current?.notifyInteraction();
+    void desktop.startDragging().catch(() => {});
+    // 系统接管后收不到 pointerup，所以这里立刻把拖拽表现收掉，
+    // 不然挤压拉伸会一直停在拖拽姿态。
+    window.setTimeout(() => rigRef.current?.setDragging(false), 120);
+  }, []);
+
+  const endDrag = useCallback(() => {
+    dragStart.current = null;
+    rigRef.current?.setDragging(false);
+  }, []);
+
   const send = useCallback(() => {
     const text = draft.trim();
     if (!text) return;
@@ -289,7 +331,20 @@ export function App() {
 
   return (
     <>
-      <div className="stage" ref={hostRef} aria-label="Step酱" />
+      <div
+        className="stage"
+        ref={hostRef}
+        aria-label="Step酱"
+        // 右键 = 打字。桌宠没有菜单栏也没有输入框常驻，右键是最顺手的入口。
+        onContextMenu={(e) => {
+          e.preventDefault();
+          openComposer();
+        }}
+        onPointerDown={beginDrag}
+        onPointerMove={maybeDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      />
       <Bubble
         petText={petText}
         userText={userText}

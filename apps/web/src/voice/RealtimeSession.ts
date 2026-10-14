@@ -85,6 +85,9 @@ export class RealtimeSession {
    * 再蹦出小半个字。
    */
   private suppressAudio = false;
+  /** 已压音量、等待确认是不是真人声的状态。 */
+  private pendingBargeIn = false;
+  private bargeInTimer: ReturnType<typeof setTimeout> | null = null;
 
   private userPartial = '';
   private petPartial = '';
@@ -250,7 +253,17 @@ export class RealtimeSession {
       voice: this.options.voice,
       input_audio_format: 'pcm16',
       output_audio_format: 'pcm16',
-      turn_detection: { type: 'server_vad' },
+      turn_detection: {
+        type: 'server_vad',
+        // 文档默认值在桌宠场景下不可用：silence_duration_ms 默认 **100ms**，
+        // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合；
+        // energy_awakeness_threshold 默认 2500（范围 0–5000）在室内环境下偏低，
+        // 键盘声、风扇、远处人声都能把她唤起来，噪声全进了对话。
+        // 这里按「一句话说完再回」调：停顿容忍到 700ms，能量门限抬到 3400。
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
+        energy_awakeness_threshold: 3400,
+      },
       input_audio_transcription: {
         model: 'stepaudio-3-asr-max',
         language: 'zh',
@@ -374,9 +387,52 @@ export class RealtimeSession {
    * 打断。barge-in 的核心：必须同步完成本地止声，网络那一刀是顺带的。
    * 顺序很重要 —— 先 flush 本地再 cancel 远端，反过来会多播 200ms。
    */
+  /** 人声持续这么久仍没出转写，也按真人处理 —— 不能让打断一直等 ASR。 */
+  private static readonly BARGE_CONFIRM_MS = 400;
+
+  private cancelBargeInTimer(): void {
+    if (this.bargeInTimer) {
+      clearTimeout(this.bargeInTimer);
+      this.bargeInTimer = null;
+    }
+    this.pendingBargeIn = false;
+  }
+
+  /** VAD 说有人开口：先压音量，等确认。 */
+  private beginBargeIn(): void {
+    if (this.pendingBargeIn) return;
+    // 她本来就没在说话，没什么要打断的，直接当新回合。
+    if (!this.responseActive && this.speech.audioLevel <= 0) {
+      this.interrupt();
+      return;
+    }
+    this.pendingBargeIn = true;
+    this.speech.duck();
+    this.bargeInTimer = setTimeout(() => {
+      this.bargeInTimer = null;
+      if (this.pendingBargeIn) this.confirmBargeIn();
+    }, RealtimeSession.BARGE_CONFIRM_MS);
+  }
+
+  /** 确认是真人声 → 执行不可逆的打断。 */
+  private confirmBargeIn(): void {
+    if (!this.pendingBargeIn) return;
+    this.interrupt();
+  }
+
+  /** 判定为噪声误触发 → 恢复音量，让她把话说完。 */
+  private cancelBargeIn(): void {
+    this.cancelBargeInTimer();
+    this.speech.unduck();
+    if (this.responseActive) this.setActivity('speaking');
+    else this.setActivity('idle');
+  }
+
   interrupt(): void {
+    this.cancelBargeInTimer();
     const hadAudio = this.speech.audioLevel > 0 || this.responseActive;
     this.speech.flush();
+    this.speech.unduck();
     // 先立起丢弃闸门，再发 cancel —— cancel 之后还会有在途增量（实测 4 条）。
     this.suppressAudio = true;
     if (this.responseActive) this.send({ type: 'response.cancel' });
@@ -442,13 +498,21 @@ export class RealtimeSession {
 
       // ---- 打断：headline feature ----
       case 'input_audio_buffer.speech_started': {
-        // 用户开口 → 立刻闭嘴。不等服务端确认，不等 response.cancelled。
-        this.interrupt();
+        // 不立刻打断 —— 打断是不可逆的（flush + response.cancel 砍掉的音频回不来），
+        // 而 VAD 会被咳嗽、键盘、关门声误触发。先压音量：听觉上已经是「她让你说」，
+        // 再等确认（听到实际转写，或者人声持续超过 BARGE_CONFIRM_MS）才真打断。
+        // 噪声那一下只会让音量抖一下，她会继续说完。
+        this.beginBargeIn();
         this.userPartial = '';
         this.setActivity('listening');
         return;
       }
       case 'input_audio_buffer.speech_stopped': {
+        // 还没确认就结束了 → 判定为误触发，恢复音量、让她接着说。
+        if (this.pendingBargeIn) {
+          this.cancelBargeIn();
+          return;
+        }
         this.setActivity('thinking');
         return;
       }
@@ -456,6 +520,8 @@ export class RealtimeSession {
       // ---- 字幕 ----
       case 'conversation.item.input_audio_transcription.delta': {
         this.userPartial += event.delta ?? '';
+        // 听到实际内容 = 确认是人在说话，这时才执行不可逆的打断。
+        if (this.userPartial.trim()) this.confirmBargeIn();
         this.options.emit({ type: 'user_transcript', text: this.userPartial, final: false });
         return;
       }

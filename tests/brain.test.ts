@@ -90,6 +90,12 @@ function fakeDesktop(options: FakeDesktopOptions = {}) {
       };
     },
     async setHitRegions() {},
+    async focusPet() {
+      calls.push({ name: 'focusPet' });
+    },
+    async startDragging() {
+      calls.push({ name: 'startDragging' });
+    },
     async setInteractive() {},
     async moveToSpot(spot) {
       calls.push({ name: 'moveToSpot', args: spot });
@@ -522,6 +528,8 @@ function makeSession(
   ws: FakeWebSocket;
   events: PetEvent[];
   executed: { name: ToolName; args: unknown }[];
+  /** 播放层探针：压音状态可读，她的出声电平可写。 */
+  speech: { ducked: boolean; level: number };
 } {
   const events: PetEvent[] = [];
   const executed: { name: ToolName; args: unknown }[] = [];
@@ -532,7 +540,37 @@ function makeSession(
   (session as unknown as { connect: (r: boolean) => Promise<void> }).connect(false);
   const ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
-  return { session, ws, events, executed };
+
+  // 播放层在 node:test 里没有 AudioContext，但打断逻辑只依赖
+  // audioLevel / duck / unduck 这三样，所以在实例上替掉它们就够了，
+  // 不必把整个 SpeechStream 做成可注入的。
+  let ducked = false;
+  let level = 0;
+  const raw = session as unknown as {
+    speech: { duck: () => void; unduck: () => void };
+  };
+  Object.defineProperty(raw.speech, 'audioLevel', {
+    configurable: true,
+    get: () => level,
+  });
+  raw.speech.duck = () => {
+    ducked = true;
+  };
+  raw.speech.unduck = () => {
+    ducked = false;
+  };
+  const speech = {
+    get ducked() {
+      return ducked;
+    },
+    get level() {
+      return level;
+    },
+    set level(v: number) {
+      level = v;
+    },
+  };
+  return { session, ws, events, executed, speech };
 }
 
 function buildSessionOptions(input: {
@@ -575,7 +613,22 @@ describe('RealtimeSession：工具闭环与上限', () => {
     assert.deepEqual(session.modalities, ['text', 'audio']);
     assert.equal(session.input_audio_format, 'pcm16');
     assert.equal(session.output_audio_format, 'pcm16');
-    assert.deepEqual(session.turn_detection, { type: 'server_vad' });
+    // 必须显式调参：文档默认 silence_duration_ms=100ms 会把一句话切成好几个回合，
+    // energy_awakeness_threshold=2500 在室内会被键盘和风扇唤起。
+    const vad = session.turn_detection as {
+      type: string;
+      silence_duration_ms: number;
+      energy_awakeness_threshold: number;
+    };
+    assert.equal(vad.type, 'server_vad');
+    assert.ok(
+      vad.silence_duration_ms >= 500,
+      '停顿容忍不能用 100ms 的默认值，否则一句话会被切断',
+    );
+    assert.ok(
+      vad.energy_awakeness_threshold > 2500,
+      '能量门限必须高于默认值，否则环境噪声全进对话',
+    );
     const transcription = session.input_audio_transcription as Record<string, unknown>;
     assert.equal(transcription.model, 'stepaudio-3-asr-max');
     assert.equal(transcription.language, 'zh');
@@ -752,16 +805,46 @@ describe('RealtimeSession：打断（headline feature）', () => {
   beforeEach(resetWebSocket);
   afterEach(cleanupSessions);
 
-  test('speech_started 立刻发 response.cancel', () => {
-    const { ws, events } = makeSession();
+  // 打断是不可逆的（flush + cancel 砍掉的音频回不来），而 VAD 会被咳嗽、键盘声误触发。
+  // 所以契约是「先压音量，确认是人声再 cancel」，不是「立刻 cancel」。
+  test('speech_started 先压音量，不立刻 cancel', () => {
+    const { ws, events, speech } = makeSession();
     ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5; // 她正在出声
     ws.sent.length = 0;
     ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
-    assert.ok(ws.sentTypes().includes('response.cancel'), '用户开口必须立刻 cancel');
+    assert.equal(ws.sentTypes().includes('response.cancel'), false, '确认前不该 cancel');
+    assert.equal(speech.ducked, true, '应当先压音量');
     assert.ok(
       events.some((e) => e.type === 'activity' && e.value === 'listening'),
-      '打断后应切到 listening',
+      '应切到 listening',
     );
+  });
+
+  test('听到实际转写才真打断', () => {
+    const { ws, speech } = makeSession();
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5;
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    ws.sent.length = 0;
+    ws.deliver({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: '等一下',
+    });
+    assert.ok(ws.sentTypes().includes('response.cancel'), '确认是人声后必须 cancel');
+  });
+
+  // 这条是本次修复的核心：一声咳嗽不该把她刚说的半句彻底砍掉。
+  test('噪声误触发（无转写就结束）不打断，音量恢复', () => {
+    const { ws, speech } = makeSession();
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.level = 0.5;
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.equal(speech.ducked, true);
+    ws.sent.length = 0;
+    ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 120 });
+    assert.equal(ws.sentTypes().includes('response.cancel'), false, '噪声不该 cancel');
+    assert.equal(speech.ducked, false, '应恢复音量继续说');
   });
 
   test('没有进行中的回复时不发多余的 cancel', () => {
@@ -782,7 +865,13 @@ describe('RealtimeSession：打断（headline feature）', () => {
     ws.deliver({ type: 'response.audio.delta', delta: 'AAAA' });
     assert.equal(enqueued, 1, '正常时应当入队');
 
+    // 走完整的打断：VAD 开口 + 听到转写（确认是人声）才是真 cancel。
+    // 只发 speech_started 不会打断 —— 那是留给噪声误触发的那一档。
     ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    ws.deliver({
+      type: 'conversation.item.input_audio_transcription.delta',
+      delta: '停',
+    });
     // 在途的 4 条
     for (let i = 0; i < 4; i++) ws.deliver({ type: 'response.audio.delta', delta: 'AAAA' });
     assert.equal(enqueued, 1, '打断后在途增量必须被丢弃，否则她会多蹦半个字');

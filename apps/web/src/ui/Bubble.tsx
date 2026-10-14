@@ -22,7 +22,7 @@ type Props = {
 };
 
 // 她说完后气泡停留多久。太短看不完，太长挡桌面。
-const LINGER_MS = 4500;
+const LINGER_MS = 6000;
 
 export function Bubble({ petText, userText, thinking, notice, link, onOpenLink, error }: Props) {
   const [visible, setVisible] = useState(false);

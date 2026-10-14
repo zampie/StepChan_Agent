@@ -16,6 +16,7 @@ export const commands = {
   setHitRegions: 'set_hit_regions',
   setInteractive: 'set_interactive',
   moveToSpot: 'move_to_spot',
+  focusPet: 'focus_pet',
   workArea: 'get_work_area',
   captureScreen: 'capture_screen',
   screenPermission: 'screen_permission_status',
@@ -147,6 +148,10 @@ export type Desktop = {
   /** 由 Rust 侧轮询驱动；这里只用于强制进入/退出交互态（例如拖放期间）。 */
   setInteractive(interactive: boolean): Promise<void>;
   moveToSpot(spot: Spot): Promise<void>;
+  /** 激活应用并聚焦桌宠窗口。Accessory 策略下 set_focus 不激活进程，输入框会点不中。 */
+  focusPet(): Promise<void>;
+  /** 交给系统接管窗口拖动。调用后本次 pointerup 不会回到 webview。 */
+  startDragging(): Promise<void>;
   workArea(): Promise<WorkArea | null>;
   captureScreen(): Promise<ScreenCapture>;
   screenPermission(): Promise<'granted' | 'denied' | 'unknown'>;

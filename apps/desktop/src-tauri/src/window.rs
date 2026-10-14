@@ -209,6 +209,34 @@ pub fn move_to_spot<R: Runtime>(app: AppHandle<R>, spot: String) -> Result<(), S
     Ok(())
 }
 
+/// 让桌宠窗口拿到键盘焦点。
+///
+/// 为什么需要专门一个命令：`ActivationPolicy::Accessory` 下应用不在 Dock 里，
+/// `window.set_focus()` **不会激活应用进程**，于是窗口里的 input 根本点不中、
+/// 打不进字 —— 表现就是「打字框选中不了」。必须先走 AppKit 激活应用本体。
+#[tauri::command]
+pub fn focus_pet<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let window = app
+        .get_webview_window(PET_LABEL)
+        .ok_or_else(|| "桌宠窗口不存在".to_string())?;
+    let _ = window.show();
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window.run_on_main_thread(|| {
+            use objc2_app_kit::NSApplication;
+            use objc2_foundation::MainThreadMarker;
+            // SAFETY: run_on_main_thread 保证我们在主线程上。
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm).activate();
+            }
+        });
+    }
+
+    let _ = window.set_focus();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_work_area<R: Runtime>(app: AppHandle<R>) -> Result<Value, String> {
     // 注意：Monitor.position/size 是物理像素，窗口创建参数是逻辑像素，必须换算。

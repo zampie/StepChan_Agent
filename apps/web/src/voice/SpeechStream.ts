@@ -126,6 +126,27 @@ export class SpeechStream {
     return this.epoch;
   }
 
+  /**
+   * 临时压低音量，用于「可能被打断」的瞬间。
+   *
+   * 为什么要有这一档：VAD 对环境噪声会误触发，而一上来就 flush + response.cancel
+   * 是不可逆的 —— 一声咳嗽就能把她刚说的半句彻底砍掉。先压音量听上去已经是
+   * 「她让你说」，等真的确认是人声再执行不可逆的打断；是噪声就恢复。
+   * 用 setTargetAtTime 做 20ms 平滑，避免爆音。
+   */
+  duck(level = 0.12): void {
+    const gain = this.gain;
+    if (!gain) return;
+    gain.gain.setTargetAtTime(level, gain.context.currentTime, 0.02);
+  }
+
+  /** 取消压低，恢复正常音量。 */
+  unduck(): void {
+    const gain = this.gain;
+    if (!gain) return;
+    gain.gain.setTargetAtTime(1, gain.context.currentTime, 0.03);
+  }
+
   get currentEpoch(): number {
     return this.epoch;
   }
