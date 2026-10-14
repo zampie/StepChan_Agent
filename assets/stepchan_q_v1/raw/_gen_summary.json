@@ -1,0 +1,66 @@
+{
+  "runs": [
+    {
+      "total": 34,
+      "ok": 32,
+      "lost": [
+        "fx-zzz",
+        "fx-heart"
+      ],
+      "needed_retry": {
+        "fx-sparkle": 3,
+        "fx-sweat": 3,
+        "fx-exclaim": 2
+      },
+      "wall_clock_s": 945.8
+    },
+    {
+      "fx_mode": "gen",
+      "total": 2,
+      "ok": 0,
+      "skipped": 0,
+      "lost": [
+        "fx-zzz",
+        "fx-heart"
+      ],
+      "needed_retry": {},
+      "wall_clock_s": 194.4
+    },
+    {
+      "fx_mode": "edit_blank",
+      "total": 2,
+      "ok": 2,
+      "skipped": 0,
+      "lost": [],
+      "needed_retry": {},
+      "wall_clock_s": 54.0
+    },
+    {
+      "fx_mode": "edit_blank",
+      "total": 1,
+      "ok": 1,
+      "skipped": 0,
+      "lost": [],
+      "needed_retry": {},
+      "wall_clock_s": 66.6
+    },
+    {
+      "fx_mode": "edit_blank",
+      "total": 3,
+      "ok": 3,
+      "skipped": 0,
+      "lost": [],
+      "needed_retry": {},
+      "wall_clock_s": 67.8
+    },
+    {
+      "fx_mode": "edit_blank",
+      "total": 1,
+      "ok": 1,
+      "skipped": 0,
+      "lost": [],
+      "needed_retry": {},
+      "wall_clock_s": 67.5
+    }
+  ]
+}

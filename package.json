@@ -11,14 +11,15 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "dev": "npm run tauri -- dev",
-    "web": "npm run dev -w @stepchan/web",
+    "dev": "npm run sync-rig && npm run tauri -- dev",
+    "web": "npm run sync-rig && npm run dev -w @stepchan/web",
     "tauri": "tauri",
+    "sync-rig": "node scripts/sync-rig.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "build": "npm run typecheck && npm run tauri -- build",
-    "build:web": "npm run build -w @stepchan/web",
-    "build:debug": "npm run tauri -- build --debug",
+    "build": "npm run sync-rig && npm run typecheck && npm run tauri -- build",
+    "build:web": "npm run sync-rig && npm run build -w @stepchan/web",
+    "build:debug": "npm run sync-rig && npm run tauri -- build --debug",
     "rig": "tools/art/build-rig.sh"
   },
   "devDependencies": {

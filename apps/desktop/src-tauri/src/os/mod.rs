@@ -6,11 +6,13 @@
 //   每次实际读取都要让前端冒出可见提示；截屏数据只在内存里走，不落盘。
 //
 // 平台约束：
-// - 截屏用 screencapturekit（真 ScreenCaptureKit）。不要 xcap —— 它 macOS 路径还是
-//   已废弃的 CGWindowListCreateImage，会让系统提示用户"该应用在绕过安全设置"。
-// - 录屏权限是 TCC「屏幕与系统录制」，没有 Info.plist 键可声明。可用
-//   CGPreflightScreenCaptureAccess 预检（不触发弹窗）、CGRequestScreenCaptureAccess 触发；
-//   但 Apple 正在劝退这组 API，拿不准就用 SCShareableContent::get() 的 SCError 当判据。
+// - 截屏走系统自带的 /usr/sbin/screencapture（见 Cargo.toml 里的理由：screencapturekit
+//   硬依赖 apple-metal，需要 macOS 26 SDK，本机只有 Command Line Tools，编不过）。
+//   用法：screencapture -x -t png <path>，-x 静音。写到 app cache 目录后立刻读入内存并删除。
+//   权限被拒时它会打印 "could not create image from display" —— 这就是判据，
+//   不要额外用 CGPreflightScreenCaptureAccess（Apple 正在劝退那组 API）。
+//   ⚠️ 实测补充：screencapture **失败时退出码仍然是 0**，错误只写 stderr，
+//   所以判据是「产物文件存在且非空」+ stderr 内容分类，不是退出码。详见 screen.rs 头部。
 // - 前台应用名走 NSWorkspace::frontmostApplication()，无 TCC 提示。
 //   读窗口标题才需要辅助功能权限 —— 不要读标题。
 // - 电量用 starship-battery（battery crate 2020 年就停更了）。
@@ -22,39 +24,115 @@ mod frontmost;
 #[cfg(target_os = "macos")]
 mod screen;
 
+use serde_json::Value;
 use tauri::{AppHandle, Runtime};
 
-#[tauri::command]
-pub fn capture_screen<R: Runtime>(_app: AppHandle<R>) -> serde_json::Value {
-    // TODO(Track D)：返回 shared/desktop.ts 的 screenCaptureSchema 形状
-    serde_json::json!({ "status": "error", "message": "截屏未实现" })
+/// 必须与 shared/desktop.ts 的 desktopEvents.frontmostChanged 一致。
+pub const FRONTMOST_CHANGED: &str = "pet://frontmost-changed";
+
+/// 剪贴板一次最多回灌多少字符。用户可能复制了一整个文件；
+/// 对话里用不上那么多，也别把它塞进模型上下文。
+#[cfg(target_os = "macos")]
+const CLIPBOARD_MAX_CHARS: usize = 4000;
+
+/// 非 macOS 平台（将来的 Android）上统一的"没有这个能力"回复。
+#[cfg(not(target_os = "macos"))]
+fn unsupported(what: &str) -> Value {
+    serde_json::json!({ "status": "error", "message": format!("当前平台不支持{what}。") })
 }
 
 #[tauri::command]
-pub fn screen_permission_status() -> String {
-    // TODO(Track D)："granted" | "denied" | "unknown"
-    "unknown".into()
+pub fn capture_screen<R: Runtime>(app: AppHandle<R>) -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        screen::capture(&app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        unsupported("截屏")
+    }
 }
 
 #[tauri::command]
-pub fn get_frontmost_app<R: Runtime>(_app: AppHandle<R>) -> Option<serde_json::Value> {
-    // TODO(Track D)
-    None
+pub fn screen_permission_status<R: Runtime>(app: AppHandle<R>) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        screen::permission_status(&app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        "unknown".into()
+    }
 }
 
 #[tauri::command]
-pub fn get_system_status<R: Runtime>(_app: AppHandle<R>) -> Option<serde_json::Value> {
-    // TODO(Track D)
-    None
+pub fn get_frontmost_app<R: Runtime>(app: AppHandle<R>) -> Option<Value> {
+    #[cfg(target_os = "macos")]
+    {
+        frontmost::frontmost(&app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        None
+    }
 }
 
 #[tauri::command]
-pub fn read_clipboard_text<R: Runtime>(_app: AppHandle<R>) -> Option<String> {
-    // TODO(Track D)：要先查 settings 的开关
-    None
+pub fn get_system_status<R: Runtime>(app: AppHandle<R>) -> Option<Value> {
+    let _ = &app;
+    #[cfg(target_os = "macos")]
+    {
+        Some(battery::system_status())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// 读一次剪贴板文字。受 settings 的 clipboardAwareness 开关控制（默认关）。
+///
+/// 返回 None 的三种情况前端都当"没读到"：开关关着、剪贴板里不是文字、读取失败。
+/// 开关关闭时的"去打开开关"提示由工具层（brain 的 read_clipboard）负责措辞 ——
+/// 这个命令的契约是 `Promise<string | null>`，塞不进拒绝消息。
+#[tauri::command]
+pub fn read_clipboard_text<R: Runtime>(app: AppHandle<R>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+
+        if crate::settings::read(&app)["clipboardAwareness"] != Value::Bool(true) {
+            return None;
+        }
+        // 剪贴板里是图片/文件时 read_text 会报错，当作"没有文字"处理。
+        let text = app.clipboard().read_text().ok()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        if text.chars().count() > CLIPBOARD_MAX_CHARS {
+            let head: String = text.chars().take(CLIPBOARD_MAX_CHARS).collect();
+            return Some(format!("{head}…（剪贴板内容过长，只读了前 {CLIPBOARD_MAX_CHARS} 个字）"));
+        }
+        Some(text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        None
+    }
 }
 
 /// 前台应用变化监听，带防抖与配额；变化时发 desktopEvents.frontmostChanged。
-pub fn spawn_frontmost_watch<R: Runtime>(_app: &AppHandle<R>) {
-    // TODO(Track D)
+pub fn spawn_frontmost_watch<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "macos")]
+    {
+        frontmost::spawn_watch(app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
 }

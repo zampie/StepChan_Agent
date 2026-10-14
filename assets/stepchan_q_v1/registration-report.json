@@ -1,0 +1,860 @@
+{
+  "diffs": {
+    "eyes.half": {
+      "ok": true,
+      "diffRatio": 0.03279,
+      "coreRatio": 0.07269,
+      "silhouetteXor": 0.00812,
+      "roi": [
+        364,
+        276,
+        652,
+        452
+      ],
+      "bbox": [
+        372,
+        289,
+        639,
+        458
+      ],
+      "reason": ""
+    },
+    "eyes.closed": {
+      "ok": true,
+      "diffRatio": 0.04049,
+      "coreRatio": 0.08843,
+      "silhouetteXor": 0.00787,
+      "roi": [
+        364,
+        276,
+        652,
+        452
+      ],
+      "bbox": [
+        371,
+        289,
+        642,
+        439
+      ],
+      "reason": ""
+    },
+    "eyes.smile": {
+      "ok": true,
+      "diffRatio": 0.03544,
+      "coreRatio": 0.06353,
+      "silhouetteXor": 0.00781,
+      "roi": [
+        364,
+        324,
+        652,
+        452
+      ],
+      "bbox": [
+        372,
+        334,
+        642,
+        439
+      ],
+      "reason": ""
+    },
+    "eyes.sparkle": {
+      "ok": true,
+      "diffRatio": 0.00913,
+      "coreRatio": 0.04489,
+      "silhouetteXor": 0.00815,
+      "roi": [
+        404,
+        356,
+        612,
+        436
+      ],
+      "bbox": [
+        410,
+        362,
+        601,
+        428
+      ],
+      "reason": ""
+    },
+    "eyes.wide": {
+      "ok": true,
+      "diffRatio": 0.02676,
+      "coreRatio": 0.07411,
+      "silhouetteXor": 0.00812,
+      "roi": [
+        380,
+        276,
+        636,
+        452
+      ],
+      "bbox": [
+        391,
+        286,
+        624,
+        440
+      ],
+      "reason": ""
+    },
+    "brow.raised": {
+      "ok": true,
+      "diffRatio": 0.00415,
+      "coreRatio": 0.04469,
+      "silhouetteXor": 0.00819,
+      "roi": [
+        380,
+        260,
+        620,
+        324
+      ],
+      "bbox": [
+        391,
+        273,
+        611,
+        319
+      ],
+      "reason": ""
+    },
+    "brow.furrowed": {
+      "ok": true,
+      "diffRatio": 0.00447,
+      "coreRatio": 0.04183,
+      "silhouetteXor": 0.0081,
+      "roi": [
+        388,
+        276,
+        620,
+        364
+      ],
+      "bbox": [
+        398,
+        289,
+        609,
+        358
+      ],
+      "reason": ""
+    },
+    "brow.worried": {
+      "ok": true,
+      "diffRatio": 0.00517,
+      "coreRatio": 0.05398,
+      "silhouetteXor": 0.00781,
+      "roi": [
+        388,
+        276,
+        620,
+        340
+      ],
+      "bbox": [
+        383,
+        289,
+        611,
+        333
+      ],
+      "reason": ""
+    },
+    "mouth.small": {
+      "ok": true,
+      "diffRatio": 0.0013,
+      "coreRatio": 0.02836,
+      "silhouetteXor": 0.00803,
+      "roi": [
+        476,
+        436,
+        540,
+        476
+      ],
+      "bbox": [
+        487,
+        443,
+        529,
+        469
+      ],
+      "reason": ""
+    },
+    "mouth.medium": {
+      "ok": true,
+      "diffRatio": 0.00267,
+      "coreRatio": 0.02799,
+      "silhouetteXor": 0.00792,
+      "roi": [
+        476,
+        428,
+        540,
+        484
+      ],
+      "bbox": [
+        484,
+        437,
+        531,
+        475
+      ],
+      "reason": ""
+    },
+    "mouth.wide": {
+      "ok": true,
+      "diffRatio": 0.00575,
+      "coreRatio": 0.03736,
+      "silhouetteXor": 0.00807,
+      "roi": [
+        468,
+        420,
+        548,
+        500
+      ],
+      "bbox": [
+        478,
+        430,
+        535,
+        488
+      ],
+      "reason": ""
+    },
+    "mouth.round": {
+      "ok": false,
+      "diffRatio": 0.00061,
+      "coreRatio": 0.01555,
+      "silhouetteXor": 0.00799,
+      "roi": [
+        484,
+        436,
+        532,
+        476
+      ],
+      "bbox": null,
+      "reason": "改动量 0.00061 低于下限 0.0008：模型实际没改动这个部位，做成覆盖层等于裁一块空白"
+    },
+    "mouth.smile": {
+      "ok": true,
+      "diffRatio": 0.00478,
+      "coreRatio": 0.02889,
+      "silhouetteXor": 0.00802,
+      "roi": [
+        468,
+        428,
+        548,
+        492
+      ],
+      "bbox": [
+        476,
+        436,
+        538,
+        483
+      ],
+      "reason": ""
+    },
+    "blush": {
+      "ok": true,
+      "diffRatio": 0.01485,
+      "coreRatio": 0.04181,
+      "silhouetteXor": 0.00829,
+      "roi": [
+        380,
+        412,
+        628,
+        484
+      ],
+      "bbox": [
+        389,
+        422,
+        621,
+        478
+      ],
+      "reason": ""
+    },
+    "face.shy": {
+      "ok": true,
+      "diffRatio": 0.04755,
+      "coreRatio": 0.0974,
+      "silhouetteXor": 0.00834,
+      "roi": [
+        364,
+        276,
+        652,
+        476
+      ],
+      "bbox": [
+        371,
+        289,
+        654,
+        466
+      ],
+      "reason": ""
+    },
+    "face.angry": {
+      "ok": true,
+      "diffRatio": 0.03686,
+      "coreRatio": 0.09496,
+      "silhouetteXor": 0.00848,
+      "roi": [
+        364,
+        244,
+        652,
+        452
+      ],
+      "bbox": [
+        372,
+        254,
+        642,
+        441
+      ],
+      "reason": ""
+    },
+    "face.sad": {
+      "ok": true,
+      "diffRatio": 0.02586,
+      "coreRatio": 0.08687,
+      "silhouetteXor": 0.00795,
+      "roi": [
+        364,
+        276,
+        652,
+        452
+      ],
+      "bbox": [
+        360,
+        289,
+        640,
+        458
+      ],
+      "reason": ""
+    },
+    "face.excited": {
+      "ok": true,
+      "diffRatio": 0.03676,
+      "coreRatio": 0.11665,
+      "silhouetteXor": 0.00859,
+      "roi": [
+        380,
+        276,
+        652,
+        500
+      ],
+      "bbox": [
+        375,
+        285,
+        639,
+        491
+      ],
+      "reason": ""
+    }
+  },
+  "alpha": {
+    "base": {
+      "transparent": 67.74,
+      "opaque": 31.66,
+      "edge": 0.61,
+      "max": 255
+    },
+    "eyes.half": {
+      "transparent": 68.03,
+      "opaque": 29.68,
+      "edge": 2.29,
+      "max": 255
+    },
+    "eyes.closed": {
+      "transparent": 68.03,
+      "opaque": 29.84,
+      "edge": 2.13,
+      "max": 255
+    },
+    "eyes.smile": {
+      "transparent": 68.02,
+      "opaque": 29.76,
+      "edge": 2.22,
+      "max": 255
+    },
+    "eyes.sparkle": {
+      "transparent": 68.03,
+      "opaque": 29.68,
+      "edge": 2.29,
+      "max": 255
+    },
+    "eyes.wide": {
+      "transparent": 68.03,
+      "opaque": 29.74,
+      "edge": 2.23,
+      "max": 255
+    },
+    "brow.raised": {
+      "transparent": 68.02,
+      "opaque": 29.7,
+      "edge": 2.28,
+      "max": 255
+    },
+    "brow.furrowed": {
+      "transparent": 68.02,
+      "opaque": 29.69,
+      "edge": 2.29,
+      "max": 255
+    },
+    "brow.worried": {
+      "transparent": 68.02,
+      "opaque": 29.8,
+      "edge": 2.18,
+      "max": 255
+    },
+    "mouth.small": {
+      "transparent": 68.02,
+      "opaque": 29.74,
+      "edge": 2.24,
+      "max": 255
+    },
+    "mouth.medium": {
+      "transparent": 68.02,
+      "opaque": 29.68,
+      "edge": 2.29,
+      "max": 255
+    },
+    "mouth.wide": {
+      "transparent": 68.03,
+      "opaque": 29.65,
+      "edge": 2.32,
+      "max": 255
+    },
+    "mouth.round": {
+      "transparent": 68.02,
+      "opaque": 29.69,
+      "edge": 2.29,
+      "max": 255
+    },
+    "mouth.smile": {
+      "transparent": 68.01,
+      "opaque": 29.65,
+      "edge": 2.33,
+      "max": 255
+    },
+    "blush": {
+      "transparent": 68.01,
+      "opaque": 29.45,
+      "edge": 2.54,
+      "max": 255
+    },
+    "face.shy": {
+      "transparent": 68.03,
+      "opaque": 29.6,
+      "edge": 2.37,
+      "max": 255
+    },
+    "face.angry": {
+      "transparent": 68.02,
+      "opaque": 29.69,
+      "edge": 2.29,
+      "max": 255
+    },
+    "face.sad": {
+      "transparent": 68.03,
+      "opaque": 29.72,
+      "edge": 2.25,
+      "max": 255
+    },
+    "face.excited": {
+      "transparent": 68.02,
+      "opaque": 29.63,
+      "edge": 2.35,
+      "max": 255
+    },
+    "action.wave": {
+      "transparent": 67.4,
+      "opaque": 30.11,
+      "edge": 2.5,
+      "max": 255
+    },
+    "action.sit": {
+      "transparent": 65.5,
+      "opaque": 31.99,
+      "edge": 2.51,
+      "max": 255
+    },
+    "action.sleep": {
+      "transparent": 64.61,
+      "opaque": 32.75,
+      "edge": 2.64,
+      "max": 255
+    },
+    "action.point": {
+      "transparent": 68.1,
+      "opaque": 29.47,
+      "edge": 2.42,
+      "max": 255
+    },
+    "action.hold": {
+      "transparent": 68.04,
+      "opaque": 29.73,
+      "edge": 2.23,
+      "max": 255
+    },
+    "action.jump": {
+      "transparent": 65.74,
+      "opaque": 31.85,
+      "edge": 2.41,
+      "max": 255
+    },
+    "action.tilt": {
+      "transparent": 69.13,
+      "opaque": 28.51,
+      "edge": 2.37,
+      "max": 255
+    },
+    "action.walk_a": {
+      "transparent": 70.43,
+      "opaque": 27.04,
+      "edge": 2.53,
+      "max": 255
+    },
+    "action.walk_b": {
+      "transparent": 70.79,
+      "opaque": 26.89,
+      "edge": 2.32,
+      "max": 255
+    },
+    "fx.sparkle": {
+      "transparent": 69.57,
+      "opaque": 24.69,
+      "edge": 5.74,
+      "max": 255
+    },
+    "fx.sweat": {
+      "transparent": 65.32,
+      "opaque": 31.68,
+      "edge": 2.99,
+      "max": 255
+    },
+    "fx.zzz": {
+      "transparent": 65.07,
+      "opaque": 25.22,
+      "edge": 9.71,
+      "max": 255
+    },
+    "fx.heart": {
+      "transparent": 47.66,
+      "opaque": 4.44,
+      "edge": 47.9,
+      "max": 255
+    },
+    "fx.exclaim": {
+      "transparent": 77.34,
+      "opaque": 19.69,
+      "edge": 2.98,
+      "max": 255
+    },
+    "fx.question": {
+      "transparent": 73.05,
+      "opaque": 23.05,
+      "edge": 3.9,
+      "max": 255
+    },
+    "fx.note": {
+      "transparent": 74.78,
+      "opaque": 21.54,
+      "edge": 3.68,
+      "max": 255
+    }
+  },
+  "chroma": {
+    "eyes.half": {
+      "bg": 68.01,
+      "edge": 2.75,
+      "subject": 29.24
+    },
+    "eyes.closed": {
+      "bg": 68.01,
+      "edge": 2.5,
+      "subject": 29.49
+    },
+    "eyes.smile": {
+      "bg": 68.0,
+      "edge": 2.62,
+      "subject": 29.38
+    },
+    "eyes.sparkle": {
+      "bg": 68.01,
+      "edge": 2.69,
+      "subject": 29.3
+    },
+    "eyes.wide": {
+      "bg": 68.01,
+      "edge": 2.63,
+      "subject": 29.36
+    },
+    "brow.raised": {
+      "bg": 68.0,
+      "edge": 2.7,
+      "subject": 29.3
+    },
+    "brow.furrowed": {
+      "bg": 68.0,
+      "edge": 2.74,
+      "subject": 29.25
+    },
+    "brow.worried": {
+      "bg": 68.0,
+      "edge": 2.57,
+      "subject": 29.43
+    },
+    "mouth.small": {
+      "bg": 68.0,
+      "edge": 2.61,
+      "subject": 29.39
+    },
+    "mouth.medium": {
+      "bg": 68.0,
+      "edge": 2.69,
+      "subject": 29.3
+    },
+    "mouth.wide": {
+      "bg": 68.01,
+      "edge": 2.71,
+      "subject": 29.28
+    },
+    "mouth.round": {
+      "bg": 68.0,
+      "edge": 2.71,
+      "subject": 29.29
+    },
+    "mouth.smile": {
+      "bg": 67.99,
+      "edge": 2.76,
+      "subject": 29.25
+    },
+    "blush": {
+      "bg": 67.99,
+      "edge": 3.0,
+      "subject": 29.01
+    },
+    "action.wave": {
+      "bg": 67.37,
+      "edge": 3.07,
+      "subject": 29.55
+    },
+    "action.sit": {
+      "bg": 65.49,
+      "edge": 2.92,
+      "subject": 31.59
+    },
+    "action.sleep": {
+      "bg": 64.59,
+      "edge": 3.3,
+      "subject": 32.1
+    },
+    "action.point": {
+      "bg": 68.09,
+      "edge": 2.96,
+      "subject": 28.95
+    },
+    "action.hold": {
+      "bg": 68.02,
+      "edge": 2.81,
+      "subject": 29.16
+    },
+    "action.jump": {
+      "bg": 65.72,
+      "edge": 3.25,
+      "subject": 31.02
+    },
+    "action.tilt": {
+      "bg": 69.11,
+      "edge": 2.8,
+      "subject": 28.09
+    },
+    "action.walk_a": {
+      "bg": 70.41,
+      "edge": 3.36,
+      "subject": 26.23
+    },
+    "action.walk_b": {
+      "bg": 70.78,
+      "edge": 2.92,
+      "subject": 26.31
+    }
+  },
+  "actions": {
+    "wave": {
+      "bbox": [
+        207,
+        19,
+        815,
+        994
+      ],
+      "height_vs_master": 1.012,
+      "width_vs_master": 1.005
+    },
+    "sit": {
+      "bbox": [
+        155,
+        115,
+        868,
+        994
+      ],
+      "height_vs_master": 0.913,
+      "width_vs_master": 1.179
+    },
+    "sleep": {
+      "bbox": [
+        28,
+        342,
+        995,
+        994
+      ],
+      "height_vs_master": 0.677,
+      "width_vs_master": 1.598
+    },
+    "point": {
+      "bbox": [
+        209,
+        28,
+        815,
+        994
+      ],
+      "height_vs_master": 1.003,
+      "width_vs_master": 1.002
+    },
+    "hold": {
+      "bbox": [
+        209,
+        32,
+        814,
+        993
+      ],
+      "height_vs_master": 0.998,
+      "width_vs_master": 1.0
+    },
+    "jump": {
+      "bbox": [
+        133,
+        44,
+        890,
+        994
+      ],
+      "height_vs_master": 0.987,
+      "width_vs_master": 1.251
+    },
+    "tilt": {
+      "bbox": [
+        218,
+        58,
+        805,
+        994
+      ],
+      "height_vs_master": 0.972,
+      "width_vs_master": 0.97
+    },
+    "walk_a": {
+      "bbox": [
+        215,
+        48,
+        808,
+        993
+      ],
+      "height_vs_master": 0.981,
+      "width_vs_master": 0.98
+    },
+    "walk_b": {
+      "bbox": [
+        222,
+        38,
+        801,
+        994
+      ],
+      "height_vs_master": 0.993,
+      "width_vs_master": 0.957
+    }
+  },
+  "thresholds": {
+    "DIFF_T": 28,
+    "DENSITY_BLUR": 6,
+    "DENSITY_T": 14,
+    "CORE_AREA_MAX": 0.15,
+    "SIL_XOR_MAX": 0.01,
+    "MIN_DIFF_RATIO": 0.0008,
+    "MIN_COMP_FRAC": 0.12,
+    "FACE_PAD": 0.18,
+    "runtime": 512,
+    "canvas": 1024
+  },
+  "base_bbox": [
+    209,
+    31,
+    814,
+    994
+  ],
+  "face_box": [
+    340,
+    260,
+    676,
+    532
+  ],
+  "generation": {
+    "runs": [
+      {
+        "total": 34,
+        "ok": 32,
+        "lost": [
+          "fx-zzz",
+          "fx-heart"
+        ],
+        "needed_retry": {
+          "fx-sparkle": 3,
+          "fx-sweat": 3,
+          "fx-exclaim": 2
+        },
+        "wall_clock_s": 945.8
+      },
+      {
+        "fx_mode": "gen",
+        "total": 2,
+        "ok": 0,
+        "skipped": 0,
+        "lost": [
+          "fx-zzz",
+          "fx-heart"
+        ],
+        "needed_retry": {},
+        "wall_clock_s": 194.4
+      },
+      {
+        "fx_mode": "edit_blank",
+        "total": 2,
+        "ok": 2,
+        "skipped": 0,
+        "lost": [],
+        "needed_retry": {},
+        "wall_clock_s": 54.0
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "name": "mouth.round",
+      "reason": "改动量 0.00061 低于下限 0.0008：模型实际没改动这个部位，做成覆盖层等于裁一块空白"
+    },
+    {
+      "name": "expression.surprised",
+      "reason": "覆盖层降级且无整脸备图（mouth.round）→ 该表情退化为中性五官"
+    },
+    {
+      "name": "expression.shy",
+      "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
+    },
+    {
+      "name": "expression.angry",
+      "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
+    },
+    {
+      "name": "expression.sad",
+      "reason": "分层无法表达腮红/怒气符号/眼泪 → 使用整脸图交叉淡入"
+    }
+  ],
+  "layer_modes": {
+    "neutral": "layers",
+    "happy": "layers",
+    "excited": "layers",
+    "curious": "layers",
+    "confused": "layers",
+    "surprised": "layers",
+    "proud": "layers",
+    "shy": "sprite",
+    "sleepy": "layers",
+    "angry": "sprite",
+    "sad": "sprite"
+  }
+}

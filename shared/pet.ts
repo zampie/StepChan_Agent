@@ -51,6 +51,15 @@ export type FxName = (typeof fxNames)[number];
 export const activities = ['idle', 'listening', 'thinking', 'speaking'] as const;
 export type Activity = (typeof activities)[number];
 
+// 可触碰的部位。原先住在 shared/room.ts 里，但房间已删除，而「摸头」属于桌宠本身
+// 的交互，和房间无关，所以挪到这里。
+export const touchParts = ['head', 'cheek', 'badge', 'hand'] as const;
+export type TouchPart = (typeof touchParts)[number];
+
+export function asTouchPart(value: string | null | undefined): TouchPart | null {
+  return touchParts.includes(value as TouchPart) ? (value as TouchPart) : null;
+}
+
 // ---- rig.json ----
 // 由 tools/art 生成，运行时加载。bbox 是覆盖层在 base 画布中的像素位置，
 // 来自与 base 的自动像素 diff，不是手工标注。

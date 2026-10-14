@@ -9,6 +9,8 @@ import { z } from 'zod';
 import type { Spot } from './pet';
 
 // Tauri command 名字集中在此，避免前后端各写一遍字符串。
+// 通知和开链接不在这里 —— 它们直接走 @tauri-apps/plugin-notification /
+// plugin-opener 的 JS 接口，没必要为了两个一行的包装再加 Rust command。
 export const commands = {
   credentials: 'get_credentials',
   setHitRegions: 'set_hit_regions',
@@ -20,8 +22,6 @@ export const commands = {
   frontmostApp: 'get_frontmost_app',
   systemStatus: 'get_system_status',
   readClipboard: 'read_clipboard_text',
-  notify: 'send_notification',
-  openUrl: 'open_external_url',
   settingsGet: 'settings_get',
   settingsSet: 'settings_set',
 } as const;
@@ -98,6 +98,10 @@ export const systemStatusSchema = z
   .strict();
 export type SystemStatus = z.infer<typeof systemStatusSchema>;
 
+// 工作区（排除菜单栏和 Dock 之后的可用区域）。
+// **单位是逻辑点（= webview 的 CSS px），不是物理像素**，另附 scaleFactor。
+// Tauri 的 Monitor getter 返回物理像素，Rust 侧已经除过对应显示器的 scale factor；
+// 混合 DPI 下混用两套 scale 就是错位的来源，所以这里只认一种单位。
 export const workAreaSchema = z
   .object({
     x: z.number().int(),
@@ -116,6 +120,7 @@ export const settingsSchema = z
     voiceEnabled: z.boolean().default(true),
     screenAwareness: z.boolean().default(false),
     appAwareness: z.boolean().default(false),
+    clipboardAwareness: z.boolean().default(false),
     autonomy: z.boolean().default(false),
     petScale: z.number().min(0.5).max(2).default(1),
     reduceMotion: z.boolean().default(false),

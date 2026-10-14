@@ -46,11 +46,16 @@ objc2-app-kit = { version = "0.3", features = [
     "NSGraphics",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSGeometry"] }
-# 真 ScreenCaptureKit。不用 xcap（macOS 路径还是已废弃的 CGWindowListCreateImage，
-# 会让系统提示用户"该应用在绕过安全设置"），也不用 scap（2025-08 起无维护）。
-screencapturekit = "11"
-objc2-core-graphics = "0.3"
 starship-battery = "0.12"
+# 截屏刻意不用 crate，走系统自带的 /usr/sbin/screencapture：
+#   - screencapturekit 11 硬依赖 apple-metal，其 Swift bridge 需要 macOS 26 SDK
+#     （MTLSamplerReductionMode），本机只有 Command Line Tools，编不过；
+#     为了截屏去装整个 Xcode 不值得。
+#   - xcap 的 macOS 路径还是已废弃的 CGWindowListCreateImage，系统会提示用户
+#     "该应用在绕过安全设置"。
+#   - screencapture 是系统二进制，内部就走 ScreenCaptureKit，走同一套 TCC 权限，
+#     零依赖且不需要 Xcode。产物写进应用缓存目录后立刻读入内存并删除。
+
 
 [profile.release]
 codegen-units = 1

@@ -13,6 +13,7 @@ fn defaults() -> Value {
         // 隐私相关默认全关。要用户在菜单里主动打开。
         "screenAwareness": false,
         "appAwareness": false,
+        "clipboardAwareness": false,
         "autonomy": false,
         "petScale": 1.0,
         "reduceMotion": false,
