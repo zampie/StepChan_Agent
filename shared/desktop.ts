@@ -24,6 +24,8 @@ export const commands = {
   readClipboard: 'read_clipboard_text',
   settingsGet: 'settings_get',
   settingsSet: 'settings_set',
+  // 把 webview 的错误转到进程 stderr —— 打包产物里没有控制台可看。
+  logFrontend: 'log_frontend',
 } as const;
 
 // Rust → webview 的事件名。

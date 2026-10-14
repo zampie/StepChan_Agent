@@ -8,9 +8,25 @@ export interface LoadedRig {
   baseUrl: string;
 }
 
+/**
+ * 从清单 URL 推出素材目录，**并绝对化**。
+ *
+ * 必须绝对化：Pixi 的 resolver 会把根相对路径 `/rig/rig/base.png` 解析成
+ * `tauri://rig/rig/base.png` —— 把第一段路径当成了 host，于是打包产物里
+ * 36 张贴图全部 `TypeError: Load failed`，而 rig.json 自己走 fetch 却是好的，
+ * 所以症状是「清单读到了、角色不出现」。给 Pixi 全限定 URL 就绕开它的解析。
+ * dev（http://127.0.0.1:5173）下绝对化同样无害。
+ */
 export function resolveBaseUrl(manifestUrl: string) {
   const i = manifestUrl.lastIndexOf('/');
-  return i < 0 ? '' : manifestUrl.slice(0, i + 1);
+  const dir = i < 0 ? '' : manifestUrl.slice(0, i + 1);
+  const base = typeof document === 'undefined' ? undefined : document.baseURI;
+  if (!base) return dir;
+  try {
+    return new URL(dir, base).href;
+  } catch {
+    return dir;
+  }
 }
 
 export async function loadRig(manifestUrl: string, fetchImpl: typeof fetch = fetch): Promise<LoadedRig> {

@@ -19,7 +19,7 @@
     "test": "tsx --test tests/*.test.ts",
     "build": "npm run sync-rig && npm run typecheck && npm run tauri -- build",
     "build:web": "npm run sync-rig && npm run build -w @stepchan/web",
-    "build:debug": "npm run sync-rig && npm run tauri -- build --debug",
+    "build:debug": "npm run sync-rig && npm run tauri -- build --debug --bundles app",
     "rig": "tools/art/build-rig.sh"
   },
   "devDependencies": {

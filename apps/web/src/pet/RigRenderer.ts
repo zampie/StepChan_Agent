@@ -7,6 +7,12 @@
 // 解耦约定：本文件不 import voice/ 或 brain/ 下的任何东西。
 // 音频电平、情绪意图都由 UI 推进来，渲染器只负责「怎么插值」。
 import { Application, Assets, Container, Sprite, Texture } from 'pixi.js';
+// Pixi 默认用 new Function() 动态拼着色器/批处理代码，而我们的 CSP 是 script-src 'self'，
+// 于是 app.init() 直接抛 "Current environment does not allow unsafe-eval"，
+// 角色一个像素都画不出来。这个模块名字有迷惑性：它是**替掉** eval 实现，
+// 让 Pixi 走不需要 eval 的那条路，所以 CSP 不用为了桌宠开 'unsafe-eval'。
+// 必须在建 Application 之前 import，所以放在这里而不是入口文件。
+import 'pixi.js/unsafe-eval';
 import {
   type ActionName,
   type BrowState,
@@ -19,6 +25,7 @@ import {
 import { BlinkScheduler, Spring, breathe, crossfadeMs, easeInOut, fxPose, squash, sway } from './motion';
 import { loadRig, proceduralActions, type LoadedRig } from './rigManifest';
 import { VisemeTracker } from './visemeMap';
+import { reportDiagnostic } from '../platform/diagnostics';
 
 export interface RigRendererOptions {
   host: HTMLElement;
@@ -140,21 +147,56 @@ export class RigRenderer {
     return this.manifest?.degraded ?? [];
   }
 
-  async init() {
-    try {
-      await this.app.init({
-        backgroundAlpha: 0,
-        antialias: true,
-        resolution: Math.min(globalThis.devicePixelRatio ?? 1, 2),
-        autoDensity: true,
-        preference: 'webgl',
-        width: this.opts.host.clientWidth || this.size,
-        height: this.opts.host.clientHeight || this.size,
-      });
-    } catch {
-      this.fail('WebGL 不可用，角色无法渲染。请检查浏览器图形加速设置。');
-      return;
+  /**
+   * 建渲染器。按「最好看 → 最保险」的顺序逐档尝试。
+   *
+   * 为什么要回退链：实测在 Tauri 的 WKWebView 里，写死 `preference:'webgl'` + MSAA 的
+   * 那一档会直接抛错，于是整个角色根本不出现 —— 而原来的 `catch {}` 把异常内容丢了，
+   * 现场只剩「桌宠完全透明」这一个毫无指向性的症状。
+   * 所以这里每一档都记下真实报错，全挂了才放弃，并把所有报错一起喊出去。
+   */
+  private async initRenderer(): Promise<boolean> {
+    const width = this.opts.host.clientWidth || this.size;
+    const height = this.opts.host.clientHeight || this.size;
+    const base = {
+      backgroundAlpha: 0,
+      resolution: Math.min(globalThis.devicePixelRatio ?? 1, 2),
+      autoDensity: true,
+      width,
+      height,
+    } as const;
+    // MSAA 是第一个要牺牲的：平涂赛璐珞风格丢掉抗锯齿的代价远小于角色不出现。
+    const attempts: { label: string; options: Parameters<Application['init']>[0] }[] = [
+      { label: 'webgl+aa', options: { ...base, antialias: true, preference: 'webgl' } },
+      { label: 'webgl', options: { ...base, antialias: false, preference: 'webgl' } },
+      { label: 'auto+aa', options: { ...base, antialias: true } },
+      { label: 'auto', options: { ...base, antialias: false } },
+      { label: 'webgpu', options: { ...base, antialias: false, preference: 'webgpu' } },
+    ];
+
+    const failures: string[] = [];
+    for (const attempt of attempts) {
+      try {
+        await this.app.init(attempt.options);
+        if (failures.length) {
+          // 降级成功也要留痕：下次有人问「为什么边缘有锯齿」时能查到原因。
+          reportDiagnostic(
+            `rig renderer: 用 ${attempt.label} 起来了；前面失败的档位 → ${failures.join(' | ')}`,
+          );
+        }
+        return true;
+      } catch (e) {
+        failures.push(`${attempt.label}: ${(e as Error)?.message ?? String(e)}`);
+        // Application 失败后内部状态不保证干净，换一个实例再试。
+        this.app = new Application();
+      }
     }
+    this.fail(`渲染器无法初始化（已尝试 ${attempts.length} 档）：${failures.join(' | ')}`);
+    return false;
+  }
+
+  async init() {
+    if (!(await this.initRenderer())) return;
     this.ready = true;
     if (this.disposed) {
       this.app.destroy(true, { children: true });
@@ -318,17 +360,26 @@ export class RigRenderer {
     for (const a of Object.values(m.actions)) files.add(a.file);
     for (const f of Object.values(m.fx)) files.add(f.file);
 
+    const reasons = new Set<string>();
     await Promise.all(
       [...files].map(async (file) => {
         try {
           const tex = await Assets.load<Texture>(this.rig!.baseUrl + file);
           this.textures.set(file, tex);
-        } catch {
+        } catch (e) {
           this.failed.add(file);
+          // 把真实原因留下。全部失败时它们几乎一定是同一个原因（CSP / 路径 / 协议），
+          // 而「36 个素材加载失败」这种计数本身完全不指向原因。
+          reasons.add((e as Error)?.message ?? String(e));
         }
       }),
     );
     if (this.failed.size > 0) {
+      const sample = [...this.failed][0];
+      reportDiagnostic(
+        `textures failed ${this.failed.size}/${files.size}; baseUrl=${this.rig!.baseUrl} ` +
+          `sample=${this.rig!.baseUrl}${sample}; reasons=${[...reasons].join(' | ') || '(无 message)'}`,
+      );
       // 不静默：缺素材会表现为「表情没反应」，必须让人看到原因。
       this.opts.onError?.(
         `${this.failed.size} 个角色素材加载失败，相关表情/动作将回退到主体图。`,

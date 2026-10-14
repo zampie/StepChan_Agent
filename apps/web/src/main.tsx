@@ -2,7 +2,11 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { SettingsView } from './ui/SettingsView';
+import { installDiagnostics } from './platform/diagnostics';
 import './style.css';
+
+// 先装诊断再挂载：挂载过程本身出错也要能被看到。
+installDiagnostics();
 
 // 两个窗口共用同一份前端产物，用 hash 区分。
 // 桌宠窗口是透明无边框的，设置窗口是普通有边框窗口 —— 它们的样式前提完全不同，

@@ -46,6 +46,7 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             credentials::get_credentials,
+            credentials::log_frontend,
             settings::settings_get,
             settings::settings_set,
             hittest::set_hit_regions,

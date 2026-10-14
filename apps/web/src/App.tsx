@@ -14,6 +14,7 @@ import { Brain } from './brain/Brain';
 import { RigRenderer } from './pet';
 import { desktop } from './platform/desktop';
 import hitRegions, { asTouchPart } from './platform/hitRegions';
+import { reportDiagnostic } from './platform/diagnostics';
 import { Bubble } from './ui/Bubble';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
 import type { ActionName, Expression, FxName, Spot, TouchPart } from '../../../shared/pet';
@@ -47,6 +48,8 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [link, setLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 素材致命错误，单独存，不被临时错误覆盖。 */
+  const [rigError, setRigError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState('');
   const [settings, setSettings] = useState<Settings>(defaultSettings);
@@ -60,9 +63,22 @@ export function App() {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const rig = new RigRenderer({ host, manifestUrl: RIG_URL, onError: setError });
+    const rig = new RigRenderer({
+      host,
+      manifestUrl: RIG_URL,
+      // 素材错误单独存：它是致命的（角色根本不出现），不能被凭据之类的
+      // 临时错误覆盖掉，否则现场只剩"桌宠不显示"这一个没有指向性的症状。
+      onError: (message) => {
+        setRigError(message);
+        reportDiagnostic(`rig: ${message} (manifestUrl=${RIG_URL})`);
+      },
+    });
     rigRef.current = rig;
-    void rig.init();
+    void rig.init().then(() => {
+      reportDiagnostic(
+        `rig ready: canvas=${rig.canvas ? 'yes' : 'no'} host=${host.clientWidth}x${host.clientHeight} degraded=${rig.degraded.length}`,
+      );
+    });
     return () => {
       rigRef.current = null;
       rig.destroy();
@@ -280,7 +296,7 @@ export function App() {
         thinking={thinking}
         notice={notice}
         link={link}
-        error={error}
+        error={rigError ?? error}
         onOpenLink={(url) => {
           setLink(null);
           void desktop.openUrl(url);
