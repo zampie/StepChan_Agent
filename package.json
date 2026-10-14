@@ -11,19 +11,19 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "dev": "concurrently -k -n server,web \"npm run dev -w @stepchan/server\" \"npm run dev -w @stepchan/web\"",
-    "assets": "node scripts/prepare-assets.mjs",
-    "validate-assets": "node scripts/prepare-assets.mjs --check",
+    "dev": "npm run tauri -- dev",
+    "web": "npm run dev -w @stepchan/web",
+    "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "build": "npm run validate-assets && npm run typecheck && npm run build -w @stepchan/web && npm run build -w @stepchan/server",
-    "start": "npm run start -w @stepchan/server",
-    "postinstall": "npm run assets"
+    "build": "npm run typecheck && npm run tauri -- build",
+    "build:web": "npm run build -w @stepchan/web",
+    "build:debug": "npm run tauri -- build --debug",
+    "rig": "tools/art/build-rig.sh"
   },
   "devDependencies": {
-    "@playwright/test": "^1.56.0",
+    "@tauri-apps/cli": "^2.12.0",
     "@types/node": "^24.0.0",
-    "concurrently": "^9.2.0",
     "prettier": "^3.9.10",
     "sharp": "^0.35.5",
     "tsx": "^4.20.0",

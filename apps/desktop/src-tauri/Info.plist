@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 麦克风三件套之一。缺这条 getUserMedia 在 WKWebView 里直接失败。
+	     另两件：Entitlements.plist 的 device.microphone / device.audio-input，
+	     以及 Rust 侧 WebviewWindowBuilder 的 on_permission_request。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Step酱 需要麦克风才能听见你说话，和你实时对话。录音只在内存中处理，不会保存到文件。</string>
+
+	<!-- 屏幕录制没有对应的 NSxxxUsageDescription 键（由 TCC 直接管），
+	     但保留这条说明以便将来 Apple 要求时就位。 -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Step酱 需要知道你正在使用哪个应用，才能和你聊到点子上。此功能默认关闭。</string>
+
+	<!-- 菜单栏专用应用：不占 Dock。运行时还会调 set_activation_policy(Accessory)，
+	     因为 LSUIElement 只在打包后的 .app 生效，tauri dev 下无效。 -->
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 麦克风：这两条必须在 entitlements 里，放进 Info.plist 不生效（tauri#8314）。 -->
+	<key>com.apple.security.device.microphone</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!-- 刻意不开 com.apple.security.app-sandbox：
+	     沙盒会挡住 ScreenCaptureKit 截屏和 NSWorkspace 前台应用查询，
+	     而我们不走 App Store 分发，hardened runtime 足够。 -->
+</dict>
+</plist>

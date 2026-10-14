@@ -1,0 +1,59 @@
+[package]
+name = "stepchan-desktop"
+version = "2.0.0"
+description = "Step酱 桌面宠物"
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "stepchan_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon: 菜单栏托盘；image-png: 用 PNG 做托盘图标
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.6"
+tauri-plugin-clipboard-manager = "2.4"
+tauri-plugin-opener = "2.7"
+tauri-plugin-store = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+base64 = "0.22"
+parking_lot = "0.12"
+
+# 桌面专用。按 target 分组是 Android 移植的接缝 —— 这些 crate 在 Android 上没有。
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-global-shortcut = "2.4"
+tauri-plugin-autostart = "2.7"
+tauri-plugin-single-instance = "2.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# 窗口层级/全屏共存、前台应用名、光标全局坐标都要直接走 AppKit，
+# 因为 Tauri 的 alwaysOnTop 只给 NSFloatingWindowLevel，不含 FullScreenAuxiliary。
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+    "NSWindow",
+    "NSScreen",
+    "NSEvent",
+    "NSApplication",
+    "NSResponder",
+    "NSGraphics",
+] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSGeometry"] }
+# 真 ScreenCaptureKit。不用 xcap（macOS 路径还是已废弃的 CGWindowListCreateImage，
+# 会让系统提示用户"该应用在绕过安全设置"），也不用 scap（2025-08 起无维护）。
+screencapturekit = "11"
+objc2-core-graphics = "0.3"
+starship-battery = "0.12"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true
