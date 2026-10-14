@@ -9,6 +9,14 @@ import { useEffect, useRef, useState } from 'react';
 type Props = {
   /** 她正在说的话（流式）。 */
   petText: string;
+  /**
+   * 她的音频是否还在播。
+   *
+   * 气泡的停留**不能**只看文字：`response.audio_transcript.done`（文字完成）
+   * 比音频播完早得多，按文字结束就开始倒计时的话，她还在说、气泡已经没了 ——
+   * 这就是「回复一闪而过」。所以只要还在出声就一直显示，停了才开始计时。
+   */
+  speaking: boolean;
   /** 用户正在说的话（realtime 的实时转写）。 */
   userText: string;
   /** 她在想（response.thinking.delta）。 */
@@ -21,23 +29,40 @@ type Props = {
   error: string | null;
 };
 
-// 她说完后气泡停留多久。太短看不完，太长挡桌面。
-const LINGER_MS = 6000;
+/** 她停止出声之后气泡还留多久。太短看不完，太长挡桌面。 */
+const LINGER_MS = 5000;
 
-export function Bubble({ petText, userText, thinking, notice, link, onOpenLink, error }: Props) {
-  const [visible, setVisible] = useState(false);
+export function Bubble({
+  petText,
+  speaking,
+  userText,
+  thinking,
+  notice,
+  link,
+  onOpenLink,
+  error,
+}: Props) {
+  const [lingering, setLingering] = useState(false);
   const timer = useRef<number>(0);
 
   useEffect(() => {
-    if (!petText) return;
-    setVisible(true);
     clearTimeout(timer.current);
-    // 每次新增文字都重置停留计时 —— 流式输出期间不应该中途消失。
-    timer.current = window.setTimeout(() => setVisible(false), LINGER_MS);
+    if (!petText) {
+      setLingering(false);
+      return;
+    }
+    if (speaking) {
+      // 还在说：保持显示，不计时。
+      setLingering(true);
+      return;
+    }
+    // 说完了（或者本来就是纯文本回复）才开始计时。
+    setLingering(true);
+    timer.current = window.setTimeout(() => setLingering(false), LINGER_MS);
     return () => clearTimeout(timer.current);
-  }, [petText]);
+  }, [petText, speaking]);
 
-  const showPet = visible && !!petText;
+  const showPet = !!petText && (speaking || lingering);
   if (!showPet && !userText && !thinking && !notice && !link && !error) return null;
 
   return (

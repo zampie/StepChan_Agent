@@ -237,6 +237,18 @@ pub fn focus_pet<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
+/// 右键菜单里的「设置…」。
+#[tauri::command]
+pub fn open_settings<R: Runtime>(app: AppHandle<R>) {
+    show_settings_window(&app);
+}
+
+/// 右键菜单里的「退出」。托盘也有一份，但右键菜单不该绕回托盘才能退出。
+#[tauri::command]
+pub fn quit_app<R: Runtime>(app: AppHandle<R>) {
+    app.exit(0);
+}
+
 #[tauri::command]
 pub fn get_work_area<R: Runtime>(app: AppHandle<R>) -> Result<Value, String> {
     // 注意：Monitor.position/size 是物理像素，窗口创建参数是逻辑像素，必须换算。

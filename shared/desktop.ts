@@ -17,6 +17,8 @@ export const commands = {
   setInteractive: 'set_interactive',
   moveToSpot: 'move_to_spot',
   focusPet: 'focus_pet',
+  openSettings: 'open_settings',
+  quitApp: 'quit_app',
   workArea: 'get_work_area',
   captureScreen: 'capture_screen',
   screenPermission: 'screen_permission_status',
@@ -145,13 +147,20 @@ export type Desktop = {
   readonly available: boolean;
   credentials(): Promise<Credentials>;
   setHitRegions(regions: HitRegion[]): Promise<void>;
-  /** 由 Rust 侧轮询驱动；这里只用于强制进入/退出交互态（例如拖放期间）。 */
-  setInteractive(interactive: boolean): Promise<void>;
+  /**
+   * 强制窗口进入/退出可交互态。`null` = 交还给 Rust 的命中轮询。
+   *
+   * 需要它的场合：输入框、拖放落点都在**角色命中区之外**，而窗口默认只在
+   * 光标落在角色身上时才接收鼠标 —— 不强制的话那些区域的点击会穿到下层应用。
+   */
+  setInteractive(interactive: boolean | null): Promise<void>;
   moveToSpot(spot: Spot): Promise<void>;
   /** 激活应用并聚焦桌宠窗口。Accessory 策略下 set_focus 不激活进程，输入框会点不中。 */
   focusPet(): Promise<void>;
   /** 交给系统接管窗口拖动。调用后本次 pointerup 不会回到 webview。 */
   startDragging(): Promise<void>;
+  openSettings(): Promise<void>;
+  quit(): Promise<void>;
   workArea(): Promise<WorkArea | null>;
   captureScreen(): Promise<ScreenCapture>;
   screenPermission(): Promise<'granted' | 'denied' | 'unknown'>;

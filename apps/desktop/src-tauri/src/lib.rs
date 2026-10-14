@@ -53,6 +53,8 @@ pub fn run() {
             hittest::set_interactive,
             window::move_to_spot,
             window::focus_pet,
+            window::open_settings,
+            window::quit_app,
             window::get_work_area,
             os::capture_screen,
             os::screen_permission_status,

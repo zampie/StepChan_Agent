@@ -47,6 +47,10 @@ function browserFallback(): Desktop {
     async moveToSpot() {},
     async focusPet() {},
     async startDragging() {},
+    async openSettings() {
+      window.location.hash = '#/settings';
+    },
+    async quit() {},
     async workArea() {
       return null;
     },
@@ -127,6 +131,12 @@ function tauriDesktop(): Desktop {
       // 走窗口 API 而不是自己算位移：系统接管后拖动跟手、跨屏也正确。
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       await getCurrentWindow().startDragging();
+    },
+    async openSettings() {
+      await invoke(commands.openSettings);
+    },
+    async quit() {
+      await invoke(commands.quitApp);
     },
     async workArea(): Promise<WorkArea | null> {
       const parsed = workAreaSchema.safeParse(await invoke(commands.workArea));

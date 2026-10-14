@@ -96,6 +96,8 @@ function fakeDesktop(options: FakeDesktopOptions = {}) {
     async startDragging() {
       calls.push({ name: 'startDragging' });
     },
+    async openSettings() {},
+    async quit() {},
     async setInteractive() {},
     async moveToSpot(spot) {
       calls.push({ name: 'moveToSpot', args: spot });

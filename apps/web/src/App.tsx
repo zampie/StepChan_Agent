@@ -16,6 +16,7 @@ import { desktop } from './platform/desktop';
 import hitRegions, { asTouchPart } from './platform/hitRegions';
 import { reportDiagnostic } from './platform/diagnostics';
 import { Bubble } from './ui/Bubble';
+import { popupPetMenu } from './ui/PetMenu';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
 import type { ActionName, Expression, FxName, Spot, TouchPart } from '../../../shared/pet';
 import type { PetEvent } from '../../../shared/brain';
@@ -41,10 +42,15 @@ export function App() {
   // 所以用 ref 当只读探针喂给它。
   const busyRef = useRef(false);
   const typingRef = useRef(false);
+  /** composing 的镜像，给事件回调读 —— 回调捕获的 state 是旧值。 */
+  const composingRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const [petText, setPetText] = useState('');
   const [userText, setUserText] = useState('');
   const [thinking, setThinking] = useState(false);
+  /** 她的音频还在播。气泡靠它决定要不要开始倒计时。 */
+  const [speaking, setSpeaking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [link, setLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,6 +59,11 @@ export function App() {
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState('');
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+
+  // 事件回调（托盘、热键）捕获的是旧 state，所以用 ref 做镜像。
+  useEffect(() => {
+    composingRef.current = composing;
+  }, [composing]);
 
   const applyAppearance = useCallback((value: Settings) => {
     rigRef.current?.setSize(Math.round(BASE_SIZE * value.petScale));
@@ -112,9 +123,9 @@ export function App() {
           break;
         case 'user_transcript':
           setUserText(event.final ? '' : event.text);
-          // 只有听清了实际内容才收掉她的气泡。原来是「有任何转写就清」，
-          // 于是一点环境噪声产生的半个字也会把她刚说的话瞬间抹掉 —— 看起来就是「一闪而过」。
-          if (event.text.trim().length >= 2) setPetText('');
+          // 刻意**不**在这里清掉她的气泡。原来是「有任何转写就清」，于是环境噪声
+          // 产生的半个字也能把她刚说的话瞬间抹掉。她的气泡由下一次回复覆盖，
+          // 或者停止出声后自然消失 —— 看不完的回复是真 bug，气泡不及时让位只是观感。
           break;
         case 'thinking':
           setThinking(true);
@@ -122,6 +133,7 @@ export function App() {
           break;
         case 'activity':
           setThinking(event.value === 'thinking');
+          setSpeaking(event.value === 'speaking');
           busyRef.current = event.value !== 'idle';
           if (event.value === 'idle') setUserText('');
           break;
@@ -229,7 +241,26 @@ export function App() {
   const openComposer = useCallback(() => {
     setComposing(true);
     awarenessRef.current?.notifyInteraction();
-    void desktop.focusPet().catch(() => {});
+    // 两件事都必需，缺一个就打不进字：
+    // 1. 输入框在窗口底部，**在角色命中区之外** —— Rust 的光标轮询只在光标落在
+    //    角色身上时才让窗口接收鼠标，所以输入框那片默认是穿透的，点击会穿到下层应用。
+    //    必须强制进入交互态，直到输入框关闭。
+    // 2. Accessory 策略下窗口不会自动成为 key window，不激活应用就拿不到键盘焦点。
+    void (async () => {
+      await desktop.setInteractive(true).catch(() => {});
+      await desktop.focusPet().catch(() => {});
+      // 必须等应用真的激活之后再 focus：窗口还不是 key window 的时候
+      // autoFocus 会静默失效，表现就是「框在那儿但打不进字」。
+      inputRef.current?.focus();
+    })();
+  }, []);
+
+  const closeComposer = useCallback(() => {
+    setComposing(false);
+    setDraft('');
+    typingRef.current = false;
+    // 交还给 Rust 的命中轮询，否则整个窗口会一直吃掉点击、不再穿透。
+    void desktop.setInteractive(null).catch(() => {});
   }, []);
 
   // ---- 托盘、热键、拖放 ----
@@ -263,11 +294,8 @@ export function App() {
     });
 
     const offHotkey = desktop.onHotkey(() => {
-      setComposing((on) => {
-        if (on) return false;
-        openComposer();
-        return true;
-      });
+      if (composingRef.current) closeComposer();
+      else openComposer();
       if (!brainRef.current?.running) void brainRef.current?.start(true).catch(fail);
     });
 
@@ -320,14 +348,12 @@ export function App() {
   const send = useCallback(() => {
     const text = draft.trim();
     if (!text) return;
-    setDraft('');
-    setComposing(false);
-    typingRef.current = false;
+    closeComposer();
     awarenessRef.current?.notifyInteraction();
     void brainRef.current
       ?.sendText(text)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : '发送失败。'));
-  }, [draft]);
+  }, [draft, closeComposer]);
 
   return (
     <>
@@ -335,11 +361,30 @@ export function App() {
         className="stage"
         ref={hostRef}
         aria-label="Step酱"
-        // 右键 = 打字。桌宠没有菜单栏也没有输入框常驻，右键是最顺手的入口。
         onContextMenu={(e) => {
           e.preventDefault();
-          openComposer();
+          void popupPetMenu(settings, {
+            onType: openComposer,
+            onToggleVoice: (next) => {
+              void (async () => {
+                await desktop.setSettings({ voiceEnabled: next });
+                const brain = brainRef.current;
+                if (!brain) return;
+                if (next) await brain.start(true);
+                else await brain.stop();
+                await reloadSettings();
+              })().catch(() => {});
+            },
+            onOpenSettings: () => void desktop.openSettings().catch(() => {}),
+            onMoveAside: () => void desktop.moveToSpot('bottom_right').catch(() => {}),
+            onQuit: () => void desktop.quit().catch(() => {}),
+          }).then((shown) => {
+            // 原生菜单起不来时退回直接开输入框，不要让右键变成「什么都没发生」。
+            if (!shown) openComposer();
+          });
         }}
+        // 双击 = 打字。
+        onDoubleClick={() => openComposer()}
         onPointerDown={beginDrag}
         onPointerMove={maybeDrag}
         onPointerUp={endDrag}
@@ -347,6 +392,7 @@ export function App() {
       />
       <Bubble
         petText={petText}
+        speaking={speaking}
         userText={userText}
         thinking={thinking}
         notice={notice}
@@ -360,6 +406,7 @@ export function App() {
       {composing && (
         <div className="composer">
           <input
+            ref={inputRef}
             autoFocus
             value={draft}
             placeholder={settings.voiceEnabled ? '说话，或者打字…' : '打字跟她说…'}
@@ -370,11 +417,7 @@ export function App() {
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();
-              if (e.key === 'Escape') {
-                setDraft('');
-                setComposing(false);
-                typingRef.current = false;
-              }
+              if (e.key === 'Escape') closeComposer();
             }}
           />
         </div>
