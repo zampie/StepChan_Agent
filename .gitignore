@@ -6,3 +6,17 @@ dist/
 apps/web/public/assets/derived/
 artifacts/
 *.log
+
+# Rust 构建产物。Tauri 的 target/ 有数万个文件、几百 MB，绝不能进版本库。
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 素材流水线中间件：1024px 原始生成图保留为 provenance，
+# 但抠色前的品红中间件和缓存不留。
+assets/stepchan_q_v1/**/*.magenta.png
+assets/stepchan_q_v1/**/.cache/
