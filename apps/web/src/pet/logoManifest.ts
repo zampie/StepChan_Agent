@@ -15,7 +15,7 @@
 //
 // 要合并进 rig.json 的话，shared/pet.ts 里加这些就够了（本文件的 schema 可直接搬过去）：
 //   export const logoSlots = ['hair', 'chest'] as const;
-//   layers: z.object({ ..., logo: z.record(z.enum(logoSlots), logoPlacementSchema).optional() })
+//   layers: z.object({ ..., logo: z.record(z.enum(actions), z.partialRecord(z.enum(logoSlots), logoPlacementSchema)).optional() })
 // 届时把 loadLogo 换成读 manifest.layers.logo 即可，渲染器其余代码不用动。
 import { actions, type ActionName } from '../../../../shared/pet';
 import { z } from 'zod';
@@ -39,7 +39,7 @@ const logoPlacementSchema = z
      */
     jiggle: z.number().min(0).max(2),
     /**
-     * 实测值：master 上那个假徽章的深色像素到其中心的最大距离（px，运行期坐标系）。
+     * 实测值：这一帧上那个假徽章的深色像素到其中心的最大距离（px，运行期坐标系）。
      * `size / 2` 必须 ≥ 这个数，否则旧徽章会从圆盘边上露出来。流水线里有断言，
      * 这里再校验一次是因为 logo.json 可能被手改过。
      */
@@ -47,6 +47,16 @@ const logoPlacementSchema = z
   })
   .strict();
 export type LogoPlacement = z.infer<typeof logoPlacementSchema>;
+
+/**
+ * 一帧（一个动作的画幅）上两枚 logo 的位置。
+ *
+ * **必须是 partialRecord**：某个姿势下徽章可能被遮住（实测 sleep 侧躺、hold 双手抱胸
+ * 的胸前徽章都量不到），那一格就不写 —— 缺键的语义是「这一帧不画这一枚」，不是「位置是 0」。
+ * zod 4 的 `z.record(z.enum(...))` 对 enum 键是穷尽校验的，用它会把这种合法的缺省判成错。
+ */
+const slotPlacementsSchema = z.partialRecord(z.enum(logoSlots), logoPlacementSchema);
+export type SlotPlacements = z.infer<typeof slotPlacementsSchema>;
 
 // 和 shared/pet.ts 的 assetSchema 同形。刻意复制而不是导出复用：
 // shared 没有导出 assetSchema，而本条线不改 shared。合并进契约时删掉这一段。
@@ -83,11 +93,14 @@ export const logoManifestSchema = z
       .passthrough(),
     canvas: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).strict(),
     asset: assetSchema,
-    placements: z.record(z.enum(logoSlots), logoPlacementSchema),
-    /** 实测的旧徽章数据（中心、外接框、覆盖半径）。只做留痕，渲染器不读。 */
+    /**
+     * **逐动作**的位置表。键必须把契约里的动作全列齐（穷尽的 record）——
+     * 「某个动作没量过」不允许表现为「少一个键」，只能表现为「值是空对象」，
+     * 这样漏掉一个动作在加载时就会报错，而不是运行到那个姿势才发现 logo 不见了。
+     */
+    placements: z.record(z.enum(actions), slotPlacementsSchema),
+    /** 实测的旧徽章数据（判据、逐帧的中心/覆盖半径/转角、整脸 sprite 的比对）。只做留痕，渲染器不读。 */
     measured: z.record(z.string(), z.unknown()).optional(),
-    /** 这份位置只在这些动作的画幅上成立。其余动作必须隐藏 logo 层。 */
-    appliesTo: z.array(z.enum(actions)).min(1),
     degraded: z.array(z.object({ name: z.string(), reason: z.string() }).strict()),
   })
   .strict();
@@ -95,8 +108,10 @@ export type LogoManifest = z.infer<typeof logoManifestSchema>;
 
 export interface LoadedLogo {
   manifest: LogoManifest;
-  /** 这份 placement 成立的动作集合。 */
-  appliesTo: ReadonlySet<ActionName>;
+  /** 至少有一枚 logo 的动作。空集意味着整层都没用 —— 调用方应该当成降级。 */
+  actionsWithLogo: ReadonlySet<ActionName>;
+  /** 某个动作该画哪几枚 logo。没有这个动作的位置数据时返回空对象。 */
+  placementsFor(action: ActionName): SlotPlacements;
 }
 
 /** logo.json 相对 rig.json 的文件名。两者同目录。 */
@@ -116,14 +131,21 @@ export function parseLogoManifest(json: unknown): LoadedLogo {
     throw new Error(`logo.json 不符合契约：${first.path.join('.')} ${first.message}`);
   }
   const m = parsed.data;
-  for (const [slot, p] of Object.entries(m.placements)) {
-    if (!p) continue;
-    // 盖不住就不要悄悄用。这是「真 logo 盖在假徽章上」唯一的硬条件。
-    if (p.size / 2 < p.coverRadius) {
-      throw new Error(
-        `logo.json 的 ${slot} 盖不住旧徽章：直径 ${p.size} / 2 < 实测覆盖半径 ${p.coverRadius}`,
-      );
+  const withLogo = new Set<ActionName>();
+  for (const [action, slots] of Object.entries(m.placements) as [ActionName, SlotPlacements][]) {
+    for (const [slot, p] of Object.entries(slots) as [LogoSlot, LogoPlacement][]) {
+      // 盖不住就不要悄悄用。这是「真 logo 盖在假徽章上」唯一的硬条件，逐帧都要成立。
+      if (p.size / 2 < p.coverRadius) {
+        throw new Error(
+          `logo.json 的 ${action}.${slot} 盖不住旧徽章：直径 ${p.size} / 2 < 实测覆盖半径 ${p.coverRadius}`,
+        );
+      }
+      withLogo.add(action);
     }
   }
-  return { manifest: m, appliesTo: new Set(m.appliesTo) };
+  return {
+    manifest: m,
+    actionsWithLogo: withLogo,
+    placementsFor: (action) => m.placements[action] ?? {},
+  };
 }

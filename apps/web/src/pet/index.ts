@@ -18,7 +18,18 @@ export {
   type LogoManifest,
   type LogoPlacement,
   type LogoSlot,
+  type SlotPlacements,
 } from './logoManifest';
+export {
+  fullBodyFallback,
+  parsePoseRegions,
+  poseRegionsFile,
+  poseRegionsManifestSchema,
+  poseRegionsUrlFor,
+  type LoadedPoseRegions,
+  type PoseRegion,
+  type PoseRegionsManifest,
+} from './poseRegions';
 export {
   VisemeTracker,
   audioVisemeLadder,
@@ -28,28 +39,27 @@ export {
 } from './visemeMap';
 export {
   BlinkScheduler,
+  HoldTimer,
   ShuffleBag,
   Spring,
   breathe,
-  clawFeel,
-  clawPose,
-  sagTarget,
-  swingTarget,
+  listenFeel,
+  listenPose,
   sway,
   squash,
   fxPose,
   easeInOut,
   crossfadeMs,
   type BlinkOptions,
-  type ClawFeel,
-  type ClawInput,
-  type ClawPose,
+  type ListenFeel,
+  type ListenPose,
 } from './motion';
 export {
   tapPools,
   tapTargets,
   tapTargetOf,
   tapActionHoldMs,
+  tapExpressionHoldMs,
   type TapReaction,
   type TapTarget,
 } from './tapReactions';

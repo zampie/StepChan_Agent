@@ -13,6 +13,7 @@ import {
   buildInstructions,
   summarizeTranscript,
   textNeedsTool,
+  textRequestsMove,
 } from '../apps/web/src/brain/persona';
 import {
   RealtimeSession,
@@ -20,7 +21,7 @@ import {
   MIN_PUSH_TO_TALK_FRAMES,
 } from '../apps/web/src/voice/RealtimeSession';
 import { defaultSettings, type Desktop, type Settings } from '../shared/desktop';
-import { toolDefinitions, type PetEvent, type ToolName, type ToolResult } from '../shared/brain';
+import { toolDefinitions, toolNames, type PetEvent, type ToolName, type ToolResult } from '../shared/brain';
 
 // ---------------------------------------------------------------- safeUrl
 
@@ -91,6 +92,23 @@ function fakeDesktop(options: FakeDesktopOptions = {}) {
         chatModel: 'step-3.7-flash',
       };
     },
+    async credentialsStatus() {
+      return {
+        configured: true,
+        fingerprint: 'sk-fak…fake',
+        source: '/tmp/.env',
+        userPath: '/tmp/.stepchan/.env',
+      };
+    },
+    async setApiKey() {
+      calls.push({ name: 'setApiKey' });
+      return {
+        configured: true,
+        fingerprint: 'sk-new…key1',
+        source: '/tmp/.stepchan/.env',
+        userPath: '/tmp/.stepchan/.env',
+      };
+    },
     async setHitRegions() {},
     async focusPet() {
       calls.push({ name: 'focusPet' });
@@ -153,14 +171,19 @@ function fakeDesktop(options: FakeDesktopOptions = {}) {
   return { desktop, calls, getSettings: () => settings };
 }
 
-function executorFor(options: FakeDesktopOptions = {}) {
-  const fake = fakeDesktop(options);
+function executorFor(
+  options: FakeDesktopOptions & { movementRequested?: () => boolean } = {},
+) {
+  const { movementRequested, ...desktopOptions } = options;
+  const fake = fakeDesktop(desktopOptions);
   const events: PetEvent[] = [];
   const context: ToolContext = {
     desktop: fake.desktop,
     getSettings: () => fake.desktop.getSettings(),
     getCredentials: () => fake.desktop.credentials(),
     emit: (event) => events.push(event),
+    // 不传就是 undefined，正好覆盖「不提供闸门时默认不动」那条用例。
+    movementRequested,
   };
   return { ...fake, events, executor: createToolExecutor(context) };
 }
@@ -287,8 +310,23 @@ describe('工具执行', () => {
     assert.equal((await harness.executor.execute('express', { expression: 'happy' })).ok, true);
   });
 
-  test('move_to 真的调了 desktop.moveToSpot', async () => {
-    const harness = executorFor();
+  // move_to 保留但被程序化门控：模型自己想挪时会被拒，用户明确要求时才放行。
+  // 乱跳的根治办法是代码判定，不是在 prompt 里求她别乱动 —— 后者就是她乱跳的原因。
+  test('用户没要求时 move_to 被拒，且根本不碰 desktop', async () => {
+    const harness = executorFor({ movementRequested: () => false });
+    const result = await harness.executor.execute('move_to', { spot: 'bottom_right' });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /只有用户明确/);
+    assert.match(result.message, /不要声称自己挪过了/);
+    assert.equal(
+      harness.calls.some((c) => c.name === 'moveToSpot'),
+      false,
+      '被拒时连 desktop 都不该碰',
+    );
+  });
+
+  test('用户明确要求时 move_to 放行', async () => {
+    const harness = executorFor({ movementRequested: () => true });
     const result = await harness.executor.execute('move_to', { spot: 'bottom_right' });
     assert.equal(result.ok, true);
     assert.deepEqual(
@@ -297,11 +335,19 @@ describe('工具执行', () => {
     );
   });
 
-  test('浏览器调试环境里 move_to 如实失败而不是假装成功', async () => {
-    const harness = executorFor({ available: false });
+  test('不提供闸门时按「没要求」处理 —— 默认方向是不动', async () => {
+    const harness = executorFor();
     const result = await harness.executor.execute('move_to', { spot: 'center' });
     assert.equal(result.ok, false);
-    assert.equal(harness.calls.some((c) => c.name === 'moveToSpot'), false);
+  });
+
+  test('textRequestsMove 认得要求、不认得闲聊', () => {
+    for (const yes of ['让开一点', '你挡住了', '挪到右下角去吧', '去角落待着', '让一让']) {
+      assert.equal(textRequestsMove(yes), true, `应判定为要求挪动：${yes}`);
+    }
+    for (const no of ['你好呀', '现在几点', '帮我看看屏幕', '我想挪一下这个窗口的位置吗']) {
+      assert.equal(textRequestsMove(no), false, `不该判定为要求挪动：${no}`);
+    }
   });
 
   test('get_time 对不存在的时区降级到本地而不是抛错', async () => {
@@ -396,10 +442,6 @@ describe('textNeedsTool：「嘴上答应却不调工具」的兜底', () => {
       ['剪贴板里有什么', 'read_clipboard'],
       ['现在几点', 'get_time'],
       ['提醒我十分钟后喝水', 'set_timer'],
-      ['让开一点', 'move_to'],
-      ['挪到右下角去吧', 'move_to'],
-      // 实测中真实出现过的那句语音（她当时只口头答应，没调工具）。
-      ['你能不能挪到屏幕右下角去，别挡着我了。', 'move_to'],
     ];
     for (const [text, expected] of cases) {
       assert.equal(textNeedsTool(text), expected, `${text} 应当命中 ${expected}`);
@@ -685,12 +727,12 @@ describe('RealtimeSession：工具闭环与上限', () => {
     ws.deliver({
       type: 'response.function_call_arguments.done',
       call_id: 'call_1',
-      name: 'move_to',
-      arguments: '{"spot":"bottom_right"}',
+      name: 'set_timer',
+      arguments: '{"seconds":600,"label":"喝水"}',
     });
     await new Promise((r) => setTimeout(r, 10));
 
-    assert.deepEqual(executed, [{ name: 'move_to', args: { spot: 'bottom_right' } }]);
+    assert.deepEqual(executed, [{ name: 'set_timer', args: { seconds: 600, label: '喝水' } }]);
     const output = ws.framesOf('conversation.item.create').at(-1);
     assert.ok(output);
     const item = output!.item as Record<string, unknown>;
@@ -698,8 +740,8 @@ describe('RealtimeSession：工具闭环与上限', () => {
     assert.equal(item.call_id, 'call_1');
     assert.deepEqual(JSON.parse(item.output as string), { ok: true, message: 'done' });
     assert.ok(ws.sentTypes().includes('response.create'), '回灌后要再触发一次回复');
-    assert.ok(events.some((e) => e.type === 'tool_start' && e.name === 'move_to'));
-    assert.ok(events.some((e) => e.type === 'tool_end' && e.name === 'move_to'));
+    assert.ok(events.some((e) => e.type === 'tool_start' && e.name === 'set_timer'));
+    assert.ok(events.some((e) => e.type === 'tool_end' && e.name === 'set_timer'));
   });
 
   test('非法参数被挡住，执行器根本不被调用', async () => {
@@ -708,8 +750,8 @@ describe('RealtimeSession：工具闭环与上限', () => {
     ws.deliver({
       type: 'response.function_call_arguments.done',
       call_id: 'bad_1',
-      name: 'move_to',
-      arguments: '{"spot":"the_moon"}',
+      name: 'set_timer',
+      arguments: '{"seconds":99999,"label":"太久了"}',
     });
     await new Promise((r) => setTimeout(r, 10));
     assert.deepEqual(executed, [], '参数非法时不能执行');
@@ -968,7 +1010,7 @@ describe('RealtimeSession：打断（headline feature，voiceInterruptible=true�
     const { ws, session } = makeSession({
       events,
       executed,
-      textNeedsTool: () => 'move_to',
+      textNeedsTool: () => 'set_timer',
     });
     ws.deliver({ type: 'response.created', response: {} });
     ws.sent.length = 0;
@@ -981,9 +1023,9 @@ describe('RealtimeSession：打断（headline feature，voiceInterruptible=true�
       .framesOf('conversation.item.create')
       .map((frame) => frame.item as Record<string, unknown>)
       .find((item) => item.role === 'system');
-    assert.ok(nudge, '没有补发强制提醒 —— 她会谎称已经挪过去了');
+    assert.ok(nudge, '没有补发强制提醒 —— 她会谎称已经办好了');
     const text = (nudge!.content as { text: string }[])[0].text;
-    assert.match(text, /move_to/);
+    assert.match(text, /set_timer/);
     assert.match(text, /不要声称自己已经做过/);
   });
 
@@ -993,15 +1035,15 @@ describe('RealtimeSession：打断（headline feature，voiceInterruptible=true�
     const { ws, session } = makeSession({
       events,
       executed,
-      textNeedsTool: () => 'move_to',
+      textNeedsTool: () => 'set_timer',
     });
     ws.deliver({ type: 'response.created', response: {} });
     session.sendText('挪到右下角去吧');
     ws.deliver({
       type: 'response.function_call_arguments.done',
       call_id: 'c1',
-      name: 'move_to',
-      arguments: '{"spot":"bottom_right"}',
+      name: 'set_timer',
+      arguments: '{"seconds":600,"label":"喝水"}',
     });
     await new Promise((r) => setTimeout(r, 1500));
     const nudge = ws

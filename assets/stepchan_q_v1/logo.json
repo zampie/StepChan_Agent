@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "source": {
     "svg": "_logo_stepfun.svg",
     "svgSha256": "d383c86fe1550754ffc2b69c5db3867cc5d3cfc45dafbaab17729fd64f4fb1e1",
@@ -83,65 +83,702 @@
     "height": 256
   },
   "placements": {
-    "hair": {
-      "cx": 318.75,
-      "cy": 119.5,
-      "size": 31,
-      "rotation": -0.06,
-      "jiggle": 0.35,
-      "coverRadius": 13.53
+    "idle": {
+      "hair": {
+        "cx": 318.5,
+        "cy": 119.5,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.416
+      },
+      "chest": {
+        "cx": 277.5,
+        "cy": 289.0,
+        "size": 17,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.5
+      }
     },
-    "chest": {
-      "cx": 277.5,
-      "cy": 289.0,
-      "size": 17,
-      "rotation": 0.0,
-      "jiggle": 0.0,
-      "coverRadius": 7.558
+    "wave": {
+      "hair": {
+        "cx": 316.0,
+        "cy": 113.5,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.463
+      },
+      "chest": {
+        "cx": 276.5,
+        "cy": 284.5,
+        "size": 18,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.81
+      }
+    },
+    "sit": {
+      "hair": {
+        "cx": 320.5,
+        "cy": 165.5,
+        "size": 32,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.892
+      },
+      "chest": {
+        "cx": 268.5,
+        "cy": 350.5,
+        "size": 21,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 9.22
+      }
+    },
+    "sleep": {
+      "hair": {
+        "cx": 194.5,
+        "cy": 239.5,
+        "size": 35,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 15.297
+      }
+    },
+    "point": {
+      "hair": {
+        "cx": 322.0,
+        "cy": 118.0,
+        "size": 30,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.21
+      },
+      "chest": {
+        "cx": 283.0,
+        "cy": 284.5,
+        "size": 17,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.5
+      }
+    },
+    "hold": {
+      "hair": {
+        "cx": 318.5,
+        "cy": 119.5,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.601
+      }
+    },
+    "jump": {
+      "hair": {
+        "cx": 325.0,
+        "cy": 123.0,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.73
+      },
+      "chest": {
+        "cx": 271.0,
+        "cy": 278.0,
+        "size": 20,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 8.746
+      }
+    },
+    "tilt": {
+      "hair": {
+        "cx": 318.5,
+        "cy": 119.5,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.416
+      },
+      "chest": {
+        "cx": 277.5,
+        "cy": 289.0,
+        "size": 17,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.5
+      }
+    },
+    "walk_a": {
+      "hair": {
+        "cx": 295.5,
+        "cy": 122.0,
+        "size": 31,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 13.647
+      },
+      "chest": {
+        "cx": 248.0,
+        "cy": 288.5,
+        "size": 18,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.632
+      }
+    },
+    "walk_b": {
+      "hair": {
+        "cx": 284.0,
+        "cy": 124.5,
+        "size": 34,
+        "rotation": -0.06,
+        "jiggle": 0.35,
+        "coverRadius": 15.008
+      },
+      "chest": {
+        "cx": 239.0,
+        "cy": 289.0,
+        "size": 18,
+        "rotation": 0.0,
+        "jiggle": 0.0,
+        "coverRadius": 7.906
+      }
     }
   },
   "measured": {
-    "hair": {
-      "pixels": 1361,
-      "bbox": [
-        613,
-        215,
-        662,
-        263
+    "method": "逐画幅实测：对每张运行期纹理（rig/*.png，512²）取「深色低饱和」连通域，按形状（长宽比/填充率）与相对 idle 的覆盖半径分派给 hair/chest，每格必须恰好一个候选；中心取外接框中心，coverRadius 取深色像素到中心的最大距离",
+    "thresholds": {
+      "darkMax": 150,
+      "darkSat": 70,
+      "minPixels": 60,
+      "aspect": [
+        0.65,
+        1.55
       ],
-      "center": [
-        637.5,
-        239.0
+      "fill": [
+        0.3,
+        0.92
       ],
-      "coverRadius": 27.06
+      "coverVsIdle": [
+        0.7,
+        1.4
+      ],
+      "coverMargin": 0.12
     },
-    "chest": {
-      "pixels": 460,
-      "bbox": [
-        542,
-        565,
-        568,
-        591
-      ],
-      "center": [
-        555.0,
-        578.0
-      ],
-      "coverRadius": 15.116
+    "idleProbe": {
+      "hair": {
+        "pixels": 1361,
+        "bbox": [
+          613,
+          215,
+          662,
+          263
+        ],
+        "center": [
+          637.5,
+          239.0
+        ],
+        "coverRadius": 27.06
+      },
+      "chest": {
+        "pixels": 460,
+        "bbox": [
+          542,
+          565,
+          568,
+          591
+        ],
+        "center": [
+          555.0,
+          578.0
+        ],
+        "coverRadius": 15.116
+      }
+    },
+    "frames": {
+      "rig/base.png": {
+        "found": {
+          "hair": {
+            "pixels": 348,
+            "bbox": [
+              306,
+              107,
+              331,
+              132
+            ],
+            "center": [
+              318.5,
+              119.5
+            ],
+            "coverRadius": 13.416,
+            "aspect": 1.0,
+            "fill": 0.557,
+            "angleDeg": -13.697,
+            "angleStrength": 0.0848
+          },
+          "chest": {
+            "pixels": 110,
+            "bbox": [
+              271,
+              283,
+              284,
+              295
+            ],
+            "center": [
+              277.5,
+              289.0
+            ],
+            "coverRadius": 7.5,
+            "aspect": 1.083,
+            "fill": 0.705,
+            "angleDeg": -0.417,
+            "angleStrength": 0.1773
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-wave.png": {
+        "found": {
+          "hair": {
+            "pixels": 367,
+            "bbox": [
+              303,
+              101,
+              329,
+              126
+            ],
+            "center": [
+              316.0,
+              113.5
+            ],
+            "coverRadius": 13.463,
+            "aspect": 1.04,
+            "fill": 0.565,
+            "angleDeg": -10.282,
+            "angleStrength": 0.0796
+          },
+          "chest": {
+            "pixels": 119,
+            "bbox": [
+              270,
+              278,
+              283,
+              291
+            ],
+            "center": [
+              276.5,
+              284.5
+            ],
+            "coverRadius": 7.81,
+            "aspect": 1.0,
+            "fill": 0.704,
+            "angleDeg": -0.542,
+            "angleStrength": 0.1303
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-sit.png": {
+        "found": {
+          "hair": {
+            "pixels": 364,
+            "bbox": [
+              308,
+              153,
+              333,
+              178
+            ],
+            "center": [
+              320.5,
+              165.5
+            ],
+            "coverRadius": 13.892,
+            "aspect": 1.0,
+            "fill": 0.582,
+            "angleDeg": -14.63,
+            "angleStrength": 0.091
+          },
+          "chest": {
+            "pixels": 156,
+            "bbox": [
+              261,
+              343,
+              276,
+              358
+            ],
+            "center": [
+              268.5,
+              350.5
+            ],
+            "coverRadius": 9.22,
+            "aspect": 1.0,
+            "fill": 0.693,
+            "angleDeg": 0.0,
+            "angleStrength": 0.2318
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-sleep.png": {
+        "found": {
+          "hair": {
+            "pixels": 475,
+            "bbox": [
+              179,
+              224,
+              210,
+              255
+            ],
+            "center": [
+              194.5,
+              239.5
+            ],
+            "coverRadius": 15.297,
+            "aspect": 1.0,
+            "fill": 0.494,
+            "angleDeg": 41.108,
+            "angleStrength": 0.07
+          }
+        },
+        "missing": {
+          "chest": "画幅上找不到符合形状与尺寸的徽章（参考覆盖半径 7.50，允许 70%–140%）：这个姿势下它被遮住或转到看不见了"
+        }
+      },
+      "rig/action-point.png": {
+        "found": {
+          "hair": {
+            "pixels": 339,
+            "bbox": [
+              310,
+              106,
+              334,
+              130
+            ],
+            "center": [
+              322.0,
+              118.0
+            ],
+            "coverRadius": 13.21,
+            "aspect": 1.0,
+            "fill": 0.589,
+            "angleDeg": -9.543,
+            "angleStrength": 0.0621
+          },
+          "chest": {
+            "pixels": 102,
+            "bbox": [
+              277,
+              278,
+              289,
+              291
+            ],
+            "center": [
+              283.0,
+              284.5
+            ],
+            "coverRadius": 7.5,
+            "aspect": 0.923,
+            "fill": 0.654,
+            "angleDeg": -2.826,
+            "angleStrength": 0.1109
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-hold.png": {
+        "found": {
+          "hair": {
+            "pixels": 354,
+            "bbox": [
+              306,
+              107,
+              331,
+              132
+            ],
+            "center": [
+              318.5,
+              119.5
+            ],
+            "coverRadius": 13.601,
+            "aspect": 1.0,
+            "fill": 0.566,
+            "angleDeg": -13.193,
+            "angleStrength": 0.0864
+          }
+        },
+        "missing": {
+          "chest": "画幅上找不到符合形状与尺寸的徽章（参考覆盖半径 7.50，允许 70%–140%）：这个姿势下它被遮住或转到看不见了"
+        }
+      },
+      "rig/action-jump.png": {
+        "found": {
+          "hair": {
+            "pixels": 333,
+            "bbox": [
+              313,
+              111,
+              337,
+              135
+            ],
+            "center": [
+              325.0,
+              123.0
+            ],
+            "coverRadius": 13.73,
+            "aspect": 1.0,
+            "fill": 0.578,
+            "angleDeg": -10.312,
+            "angleStrength": 0.0736
+          },
+          "chest": {
+            "pixels": 148,
+            "bbox": [
+              263,
+              270,
+              279,
+              286
+            ],
+            "center": [
+              271.0,
+              278.0
+            ],
+            "coverRadius": 8.746,
+            "aspect": 1.0,
+            "fill": 0.578,
+            "angleDeg": 7.266,
+            "angleStrength": 0.1267
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-walk_a.png": {
+        "found": {
+          "hair": {
+            "pixels": 353,
+            "bbox": [
+              283,
+              110,
+              308,
+              134
+            ],
+            "center": [
+              295.5,
+              122.0
+            ],
+            "coverRadius": 13.647,
+            "aspect": 1.042,
+            "fill": 0.588,
+            "angleDeg": -10.113,
+            "angleStrength": 0.0755
+          },
+          "chest": {
+            "pixels": 123,
+            "bbox": [
+              241,
+              282,
+              255,
+              295
+            ],
+            "center": [
+              248.0,
+              288.5
+            ],
+            "coverRadius": 7.632,
+            "aspect": 1.077,
+            "fill": 0.676,
+            "angleDeg": 6.868,
+            "angleStrength": 0.1252
+          }
+        },
+        "missing": {}
+      },
+      "rig/action-walk_b.png": {
+        "found": {
+          "hair": {
+            "pixels": 364,
+            "bbox": [
+              271,
+              111,
+              297,
+              138
+            ],
+            "center": [
+              284.0,
+              124.5
+            ],
+            "coverRadius": 15.008,
+            "aspect": 0.963,
+            "fill": 0.519,
+            "angleDeg": -7.16,
+            "angleStrength": 0.0835
+          },
+          "chest": {
+            "pixels": 130,
+            "bbox": [
+              232,
+              282,
+              246,
+              296
+            ],
+            "center": [
+              239.0,
+              289.0
+            ],
+            "coverRadius": 7.906,
+            "aspect": 1.0,
+            "fill": 0.663,
+            "angleDeg": 0.933,
+            "angleStrength": 0.0993
+          }
+        },
+        "missing": {}
+      }
+    },
+    "spriteExpressions": {
+      "shy": {
+        "found": {
+          "hair": {
+            "pixels": 350,
+            "bbox": [
+              306,
+              107,
+              331,
+              132
+            ],
+            "center": [
+              318.5,
+              119.5
+            ],
+            "coverRadius": 13.601,
+            "aspect": 1.0,
+            "fill": 0.56,
+            "angleDeg": -13.96,
+            "angleStrength": 0.0838
+          },
+          "chest": {
+            "pixels": 116,
+            "bbox": [
+              271,
+              282,
+              284,
+              295
+            ],
+            "center": [
+              277.5,
+              288.5
+            ],
+            "coverRadius": 7.81,
+            "aspect": 1.0,
+            "fill": 0.686,
+            "angleDeg": -1.166,
+            "angleStrength": 0.1258
+          }
+        },
+        "missing": {}
+      },
+      "angry": {
+        "found": {
+          "hair": {
+            "pixels": 348,
+            "bbox": [
+              306,
+              107,
+              331,
+              132
+            ],
+            "center": [
+              318.5,
+              119.5
+            ],
+            "coverRadius": 13.416,
+            "aspect": 1.0,
+            "fill": 0.557,
+            "angleDeg": -13.531,
+            "angleStrength": 0.0818
+          },
+          "chest": {
+            "pixels": 114,
+            "bbox": [
+              271,
+              282,
+              284,
+              295
+            ],
+            "center": [
+              277.5,
+              288.5
+            ],
+            "coverRadius": 7.81,
+            "aspect": 1.0,
+            "fill": 0.675,
+            "angleDeg": -0.693,
+            "angleStrength": 0.1249
+          }
+        },
+        "missing": {}
+      },
+      "sad": {
+        "found": {
+          "hair": {
+            "pixels": 349,
+            "bbox": [
+              306,
+              107,
+              331,
+              132
+            ],
+            "center": [
+              318.5,
+              119.5
+            ],
+            "coverRadius": 13.601,
+            "aspect": 1.0,
+            "fill": 0.558,
+            "angleDeg": -13.599,
+            "angleStrength": 0.0832
+          },
+          "chest": {
+            "pixels": 116,
+            "bbox": [
+              271,
+              282,
+              284,
+              295
+            ],
+            "center": [
+              277.5,
+              288.5
+            ],
+            "coverRadius": 7.81,
+            "aspect": 1.0,
+            "fill": 0.686,
+            "angleDeg": -0.494,
+            "angleStrength": 0.123
+          }
+        },
+        "missing": {}
+      }
     }
   },
-  "appliesTo": [
-    "idle",
-    "tilt"
-  ],
   "degraded": [
     {
-      "name": "logo.nonIdleActions",
-      "reason": "logo 的位置是按 idle 画幅实测的（见 measured）。换姿势的动作图上徽章位置全变了，所以 logo 层只在 idle, tilt 下显示；其余动作会露出 master 自带的假徽章。要修就得为每个动作各量一次位置，不是改一个数能解决的"
+      "name": "logo.chest.sleep",
+      "reason": "rig/action-sleep.png：画幅上找不到符合形状与尺寸的徽章（参考覆盖半径 7.50，允许 70%–140%）：这个姿势下它被遮住或转到看不见了"
+    },
+    {
+      "name": "logo.chest.hold",
+      "reason": "rig/action-hold.png：画幅上找不到符合形状与尺寸的徽章（参考覆盖半径 7.50，允许 70%–140%）：这个姿势下它被遮住或转到看不见了"
     },
     {
       "name": "logo.steps",
       "reason": "原 SVG 的 5 个阶梯方块是镂空（透明），这里填成不透明白色。镂空会让下面那个假徽章从缝里透出来；填白之后圆盘整体不透明，视觉上等同 logo 在白底上的样子，但严格说不是「镂空」"
+    },
+    {
+      "name": "logo.rotation",
+      "reason": "自转角没有用实测值。badge_angle() 用四次谐波量出了每一帧假徽章自身的转角（见 measured.frames[*].found[*].angleDeg，发饰各帧 -7°～-15°、sleep 那帧 +41°），但方块有 4 重对称，θ 与 θ±90° 在像素上完全等价（sleep 的 +39° 与 -51° 无法区分），而且阶梯是品牌标记、有正置的惯用读法 —— 跟着假徽章转会读作「logo 歪了」。所以 placement.rotation 用的是 LOGO_TUNING 里的固定小角度（发饰 -3.4°、胸前 0°）"
     }
   ]
 }

@@ -18,7 +18,6 @@ const CHAT_MODE = `# 这一轮你的工作方式（重要）
 - 用户问「我在干什么」「看看这个」「这屏幕上是啥」→ 直接调 glance_screen，不要先说「我看不到你的屏幕」。
   能不能看由隐私开关决定，而**开关的状态由工具告诉你**，不是你猜。先调，被拒再说。
 - 用户问时间、电量、系统 → 直接调 get_time / get_system_status，不要凭感觉报一个数。
-- 用户说「让开」「挡住了」→ 直接调 move_to，不要问他想让你去哪（除非他明确要你问）。
 - 想表达情绪 → 调 express，不要用文字描述表情。
 - 需要两件信息就调两次，不用攒到一轮里问用户。
 
@@ -30,16 +29,23 @@ const CHAT_MODE = `# 这一轮你的工作方式（重要）
 
 先调工具、拿到结果、再用一两句话把结论说给用户。不要把工具返回的原文照读出来。`;
 
-const TEXT_ONLY = `# 这一版你听不到声音
-智能模式暂时只接文字输入：用户是**打字**跟你说话的，你听不到他的声音，也不知道他的语气。
-所以不要说「我听你的声音有点累」这种话，也不要让他「再说一遍」—— 说「再打一次给我看看」。
+// 两种输入都只变成文字给她看，所以这段必须**不**假设用户是在打字。
+// 之前这里写的是「你听不到声音，让他再打一次」—— 接上按住说话之后那句话就成了 bug：
+// 用户按着说完一段，她回「再打一次给我看看」。
+const INPUT_MODE = `# 用户怎么跟你说话
+智能模式下用户可能在打字，也可能长按你说话（语音会先转成文字再给你）。
+你拿到的**永远是文字**：听不到语气、音量，也听不出他是不是在笑。所以——
+
+- 不要评论他的声音或语气，「你听起来很累」这类话一句都不要说。
+- 没听懂就说「再跟我说一次」，不要指定他该打字还是该说话 —— 你并不知道他刚用的是哪种。
+
 你的回复仍然会被念出来，口语约束照旧。`;
 
 export type ChatPersonaContext = PersonaContext;
 
 /** 组装 chat 模式的完整 instructions。 */
 export function buildChatInstructions(context: ChatPersonaContext): string {
-  return [buildInstructions(context), CHAT_MODE, TEXT_ONLY].join('\n\n');
+  return [buildInstructions(context), CHAT_MODE, INPUT_MODE].join('\n\n');
 }
 
 /** 按当前设置和环境生成 instructions 的小工厂，ChatSession 每轮调用它。 */

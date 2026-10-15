@@ -236,11 +236,8 @@ describe('工具参数校验：模型给的东西一律不可信', () => {
     assert.equal(toolArgSchemas.express.safeParse({ expression: 'happy', sprite: '../../etc/passwd' }).success, false);
   });
 
-  test('move_to 只接受白名单位置', () => {
-    assert.equal(toolArgSchemas.move_to.safeParse({ spot: 'bottom_right' }).success, true);
-    assert.equal(toolArgSchemas.move_to.safeParse({ spot: 'the_moon' }).success, false);
-    assert.equal(toolArgSchemas.move_to.safeParse({}).success, false);
-  });
+  // move_to 已整体移除（模型会自己乱挪位置），所以这里不再有「白名单位置」要测。
+  // 对应的回归断言在 tests/brain.test.ts 的「模型没有挪动自己的工具」。
 
   test('set_timer 的秒数被夹在 10..7200 且必须是整数', () => {
     assert.equal(toolArgSchemas.set_timer.safeParse({ seconds: 60, label: '喝水' }).success, true);

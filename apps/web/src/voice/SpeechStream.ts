@@ -1,8 +1,42 @@
 // 播放侧：base64 PCM16 增量 → AudioWorklet 环形缓冲，支持瞬时 flush。
 //
 // 设计要点见 public/audio-playback.js 顶部注释。这一层只负责：
-// 解 base64、按需重采样信息传给 worklet、暴露 0..1 的音量给口型用。
+// 解 base64、按需重采样信息传给 worklet、暴露 0..1 的音量给口型用、
+// 把语速（播放侧时间伸缩的倍率）同步给 worklet。
 import { REALTIME_SAMPLE_RATE } from '../../../../shared/realtime';
+import { defaultSettings } from '../../../../shared/desktop';
+
+/** 语速范围，与 shared/desktop.ts 的 settings.speechRate 一致。 */
+export const MIN_SPEECH_RATE = 0.8;
+export const MAX_SPEECH_RATE = 1.8;
+
+export function clampSpeechRate(rate: number): number {
+  if (!Number.isFinite(rate)) return defaultSettings.speechRate;
+  return Math.min(MAX_SPEECH_RATE, Math.max(MIN_SPEECH_RATE, rate));
+}
+
+/**
+ * 当前的播放语速。
+ *
+ * 为什么是模块级而不是构造参数：SpeechStream 由 RealtimeSession 和 ChatBrain
+ * 各自 new 出来（也可能在一次会话里重建多次），而语速是**一个全局的用户设置**。
+ * 放在模块级意味着集成层只要在设置变更时调一次 setSpeechRate()，
+ * 之后新建的实例自动带上正确的倍率，不用把它穿过两条链路的构造函数。
+ */
+let speechRate = clampSpeechRate(defaultSettings.speechRate);
+/** 活着的实例。setSpeechRate 要立刻作用到正在说话的那一个。 */
+const live = new Set<SpeechStream>();
+
+/** 改变所有（含之后新建的）播放实例的语速。运行时随时可调。 */
+export function setSpeechRate(rate: number): number {
+  speechRate = clampSpeechRate(rate);
+  for (const stream of live) stream.setRate(speechRate);
+  return speechRate;
+}
+
+export function currentSpeechRate(): number {
+  return speechRate;
+}
 
 export type SpeechStreamEvents = {
   /** 0..1，驱动口型。flush 后立刻变 0。 */
@@ -31,11 +65,23 @@ export class SpeechStream {
   /** 每次 flush/stop 自增。迟到的 enqueue 用它丢弃。 */
   private epoch = 0;
   private disposed = false;
+  /** 播放语速。默认跟随模块级的全局值。 */
+  private rate: number;
 
-  constructor(private readonly events: SpeechStreamEvents = {}) {}
+  constructor(
+    private readonly events: SpeechStreamEvents = {},
+    options: { rate?: number } = {},
+  ) {
+    this.rate = clampSpeechRate(options.rate ?? speechRate);
+    live.add(this);
+  }
 
   get audioLevel(): number {
     return this.level;
+  }
+
+  get speechRate(): number {
+    return this.rate;
   }
 
   get contextState(): AudioContextState | 'none' {
@@ -70,7 +116,7 @@ export class SpeechStream {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [1],
-      processorOptions: { sourceRate: REALTIME_SAMPLE_RATE },
+      processorOptions: { sourceRate: REALTIME_SAMPLE_RATE, rate: this.rate },
     });
     node.port.onmessage = (event) => {
       const data = event.data as { type: string; value?: number };
@@ -127,6 +173,19 @@ export class SpeechStream {
   }
 
   /**
+   * 改变播放语速（保持音高的时间伸缩倍率），夹在 0.8~1.8。
+   *
+   * 可以在说话中途改 —— worklet 不清缓冲，已经合成好的那几十毫秒照原速播完，
+   * 下一轮才换倍率，所以拖滑块时中间不会出现空洞或爆音。
+   * 倍率回到 1 时 worklet 走旁路，一个样本都不经过伸缩处理。
+   */
+  setRate(rate: number): number {
+    this.rate = clampSpeechRate(rate);
+    this.node?.port.postMessage({ type: 'rate', value: this.rate });
+    return this.rate;
+  }
+
+  /**
    * 临时压低音量，用于「可能被打断」的瞬间。
    *
    * 为什么要有这一档：VAD 对环境噪声会误触发，而一上来就 flush + response.cancel
@@ -158,6 +217,7 @@ export class SpeechStream {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    live.delete(this);
     this.flush();
     if (this.node) this.node.port.onmessage = null;
     this.node?.disconnect();

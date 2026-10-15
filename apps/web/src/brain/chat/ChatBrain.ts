@@ -4,14 +4,20 @@
 // 它和 Brain 的内部结构完全不同：
 //   Brain      → RealtimeSession（WebSocket 全双工，模型自己出音频）
 //   ChatBrain  → ChatSession（HTTP 流式）+ SpeechSynthesizer（我们自己按句合成）
+//                + PushToTalkRecorder（我们自己攒音频提交 ASR）
+//
+// 语音输入**只有按住说话**：没有服务端 VAD，持续聆听要自己断句，不做（见 ./listen.ts）。
+// 转写出来的文本直接喂 sendText()，所以字幕、工具、TTS 全部复用打字那条链。
 //
 // 哪些方法在这个模式下是空操作，以及为什么，见各方法的注释。
 import { toolDefinitions, type PetEvent, type ToolName } from '../../../../../shared/brain';
 import type { Credentials, Desktop, Settings } from '../../../../../shared/desktop';
 import { desktop as defaultDesktop } from '../../platform/desktop';
 import { SpeechStream } from '../../voice/SpeechStream';
+import type { MicStreamEvents } from '../../voice/MicStream';
 import { createToolExecutor, type ToolExecutorHandle } from '../tools';
 import { ChatSession, type TranscriptEntry } from './ChatSession';
+import { PushToTalkRecorder, type MicLike } from './listen';
 import { chatInstructionsFor } from './persona';
 import { SpeechSynthesizer, type SpeechSink } from './tts';
 
@@ -39,6 +45,11 @@ export type ChatBrainOptions = {
   createAudio?: (events: AudioOutputEvents) => AudioOutput;
   /** 注入 fetch，测试里塞假的。 */
   fetchImpl?: typeof fetch;
+  /**
+   * 注入采集侧。默认 new MicStream(events)。
+   * 测试和探测脚本在 Node 里跑，没有 AudioContext，必须换掉它。
+   */
+  createMic?: (events: MicStreamEvents) => MicLike;
 };
 
 export class ChatBrain {
@@ -50,6 +61,7 @@ export class ChatBrain {
   private synth: SpeechSynthesizer | null = null;
   private audio: AudioOutput | null = null;
   private tools: ToolExecutorHandle | null = null;
+  private recorder: PushToTalkRecorder | null = null;
   private level = 0;
   private starting: Promise<void> | null = null;
 
@@ -102,10 +114,10 @@ export class ChatBrain {
   /**
    * 准备好这个模式需要的一切。
    *
-   * withMic 在这里被**忽略**：chat 模式没有 realtime 的服务端 VAD，这一版只接
-   * 文字输入（方案见 docs/BRAIN_MODES.md）。不在这里报错是因为 UI 的默认调用是
-   * start(true)，每次启动弹一个错误没有意义；用户**主动**点麦克风时才告诉他
-   * （见 enableMic）。
+   * withMic 在这里被**忽略**，而且连麦克风都不碰：
+   * - 它的含义是「持续聆听」，chat 模式没有服务端 VAD，这一版不做（见 ./listen.ts）；
+   * - 语音输入只有「按住说话」，权限在第一次长按时才申请 —— 一启动就弹权限框
+   *   的桌宠会被当成流氓软件。
    *
    * 仍然要在用户手势里调一次：AudioContext 必须在手势里 resume，
    * 否则表现为「一切正常但没声音」。
@@ -121,7 +133,7 @@ export class ChatBrain {
 
   private async doStart(withMic: boolean): Promise<void> {
     if (withMic) {
-      console.info('[ChatBrain] chat 模式这一版不接语音输入，已忽略 withMic。');
+      console.info('[ChatBrain] chat 模式没有持续聆听，语音输入只有按住说话。');
     }
     let credentials: Credentials;
     let settings: Settings;
@@ -167,6 +179,7 @@ export class ChatBrain {
       getApiKey: async () => (await this.loadCredentials()).apiKey,
       // 每段都重新读设置里的音色：chat 模式换音色不用重建任何东西。
       getVoice: () => this.settings?.voice ?? settings.voice,
+      getSpeechRate: () => this.settings?.speechRate ?? settings.speechRate,
       sink: audio,
       onError: (message) => this.emit({ type: 'error', message }),
       fetchImpl: this.options.fetchImpl,
@@ -206,6 +219,34 @@ export class ChatBrain {
       fetchImpl: this.options.fetchImpl,
     });
 
+    // 录音器在这里就建好（构造它不碰麦克风，也不碰 AudioContext），
+    // 这样「启动后第一个动作就是长按」不用等一次异步初始化。
+    this.recorder = new PushToTalkRecorder({
+      getApiKey: async () => (await this.loadCredentials()).apiKey,
+      createMic: this.options.createMic,
+      fetchImpl: this.options.fetchImpl,
+      events: {
+        // 转写结果走打字那条链：字幕、工具、TTS 一个都不用新写。
+        onUtterance: (text) => {
+          void this.sendText(text).catch((error: unknown) => {
+            this.emit({
+              type: 'error',
+              message: `这句话没发出去：${error instanceof Error ? error.message : '未知错误'}`,
+            });
+          });
+        },
+        onError: (message) => this.emit({ type: 'error', message }),
+        onNotice: (message) => this.emit({ type: 'notice', message }),
+        onState: (state) => {
+          // transcribing 映射成 thinking：对用户来说「她在琢磨我刚说的话」，
+          // 转写和模型推理没有区别，不值得多一个 UI 状态。
+          if (state === 'listening') this.emit({ type: 'activity', value: 'listening' });
+          else if (state === 'transcribing') this.emit({ type: 'activity', value: 'thinking' });
+          else this.emit({ type: 'activity', value: 'idle' });
+        },
+      },
+    });
+
     this.emit({ type: 'connection', state: 'open' });
     this.emit({ type: 'activity', value: 'idle' });
   }
@@ -218,54 +259,52 @@ export class ChatBrain {
   }
 
   /**
-   * 空操作 + 如实告知。
+   * 持续聆听这一版没有，如实告知。
    *
-   * chat 模式没有 realtime 的服务端 VAD，这一版不接语音输入。做成空操作而不是
-   * 偷偷降级，是因为用户点了麦克风按钮就是想说话 —— 不告诉他，他会对着麦克风
-   * 说半天然后以为是 bug。
+   * 为什么不偷偷降级成「按住说话」：用户点麦克风按钮的预期是「从现在起你一直听着」，
+   * 给他一个要一直按住的入口而不说清楚，他会对着麦克风说半天然后以为是 bug。
+   *
+   * 用 notice 而不是 error：这是能力说明，不是故障（UI 给 error 配的是告警样式）。
    */
   async enableMic(): Promise<void> {
     this.emit({
-      type: 'error',
-      message: '智能模式这一版还不能听你说话，先打字吧。想用语音就在菜单里切回默认模式。',
+      type: 'notice',
+      message: '智能模式不能一直听着，但可以长按我说话 —— 按住说，松手我就去想。',
     });
   }
 
-  /** 空操作：这个模式从来没开过麦克风。 */
+  /** 空操作：这个模式不会常开麦克风，没有要关的。长按的麦克风由录音器自己收。 */
   disableMic(): void {}
 
   /**
-   * 「按住说话」。chat 模式这一版没有语音输入，所以这是空操作 —— 但会告诉用户。
+   * 「按住说话」—— chat 模式**唯一**的语音入口。
    *
-   * 为什么选「发 error 事件」而不是完全静默：长按桌宠是一个**明确的用户动作**，
-   * 他按下去就是想说话。静默失败的表现是「按住、说完、松手、什么都没发生」，
-   * 用户只会以为是 bug。和 enableMic 一个道理。
+   * 麦克风权限在这里第一次申请（不在 start() 里）。会话还没起来就先起，
+   * 这样「启动后第一个动作就是长按」也能用（和 Brain 的行为一致）。
    *
-   * 为什么不抛异常：App.tsx 的长按手势不该因为模式不同而需要 try/catch。
+   * 不会 reject：长按手势不该因为模式不同而需要 try/catch。失败走 error 事件。
    */
   async beginPushToTalk(): Promise<void> {
-    // notice 而不是 error：这是能力说明，不是故障。
-    // UI 给 error 配的是告警样式，用红框显示「本模式只支持打字」会让人以为出问题了。
-    this.emit({
-      type: 'notice',
-      message: '智能模式现在只支持打字。想按住说话就在菜单里切回默认模式。',
-    });
+    if (!this.session) await this.start(false);
+    await this.recorder?.begin();
   }
 
-  /** 空操作：没有在进行的按住说话可以结束。不发事件 —— 按下时已经说过一次了。 */
-  endPushToTalk(): void {}
+  /** 松手 = 说完了。这里才真正提交音频去转写（太短的会被当误触静默丢掉）。 */
+  endPushToTalk(): void {
+    this.recorder?.end();
+  }
 
-  /** 恒为 false：这个模式永远没有「正在按住说话」的状态。 */
+  /** 按住说话进行中（手指还按着）。转写在途时为 false —— 那时已经松手了。 */
   get pushToTalkActive(): boolean {
-    return false;
+    return this.recorder?.active ?? false;
   }
 
   /**
-   * 恒为 false。
+   * 恒为 false：**持续聆听**在这个模式下不存在。
    *
-   * 语义是「她现在是不是在采集音频」，而不是「设置里的 listening 开关是什么」——
-   * chat 模式不碰麦克风，所以答案永远是 false，和设置里写的无关。UI 依赖它来决定
-   * 要不要显示「正在听」的指示，返回 true 会显示一个不存在的状态。
+   * 语义是「她是不是一直开着麦在听」，不是「设置里的 listening 开关是什么」，
+   * 也不是「此刻有没有在采集」—— 按住说话期间的采集状态看 pushToTalkActive。
+   * UI 依赖它来决定要不要显示常驻的「正在听」指示，返回 true 会显示一个不存在的状态。
    * 设置本身仍然保留（切回 realtime 模式后照旧生效）。
    */
   get listening(): boolean {
@@ -275,15 +314,22 @@ export class ChatBrain {
   /**
    * 恒为 false。
    *
-   * 语音打断需要麦克风和 VAD，两者在这个模式下都没有。
+   * 语音自动打断需要「她说话时也开着麦 + VAD」，两者在这个模式下都没有
+   * （按住说话期间她本来就该闭嘴）。
    * 手动打断（点她一下、按 Esc）走 interrupt()，不受这个值影响，照常可用。
    */
   get voiceInterruptible(): boolean {
     return false;
   }
 
-  /** 手动打断（点她一下、按热键）。 */
+  /**
+   * 手动打断（点她一下、按热键）。
+   *
+   * 连在途的录音/转写一起废掉：不然用户按了「停」之后几秒，上一句的转写回来了，
+   * 又凭空发起一轮对话（工具会真的执行）。
+   */
   interrupt(): void {
+    this.recorder?.cancel();
     this.session?.interrupt();
     this.synth?.cancel();
     this.level = 0;
@@ -315,11 +361,16 @@ export class ChatBrain {
     const synth = this.synth;
     const audio = this.audio;
     const tools = this.tools;
+    const recorder = this.recorder;
     this.session = null;
     this.synth = null;
     this.audio = null;
     this.tools = null;
+    this.recorder = null;
     this.level = 0;
+    // 录音器先收：麦克风必须在这一刻就放掉（系统录音指示灯要灭），
+    // 在途的转写也一起废掉 —— 切模式之后还冒出来一句话是最糟的表现。
+    recorder?.dispose();
     session?.interrupt();
     synth?.dispose();
     tools?.dispose();

@@ -9,6 +9,17 @@
 // 勾选项的状态每次弹出时按当前设置重建，所以不需要维护菜单实例。
 import type { Settings } from '../../../../shared/desktop';
 
+/**
+ * 右键菜单里的语速档位。细调（0.8~1.8 连续）在设置窗里。
+ * 1.15 是默认档 —— 模型原速听着有点慢。
+ */
+export const SPEECH_RATE_PRESETS: { label: string; value: number }[] = [
+  { label: '慢一点（0.9×）', value: 0.9 },
+  { label: '正常（1.15×）', value: 1.15 },
+  { label: '快一点（1.4×）', value: 1.4 },
+];
+
+
 export type PetMenuActions = {
   onType: () => void;
   /** 任意设置项改动都走这一个口子，由集成层决定要不要重建会话。 */
@@ -31,10 +42,27 @@ export async function popupPetMenu(
     const { MenuItem } = await import('@tauri-apps/api/menu/menuItem');
     const { CheckMenuItem } = await import('@tauri-apps/api/menu/checkMenuItem');
     const { PredefinedMenuItem } = await import('@tauri-apps/api/menu/predefinedMenuItem');
+    const { Submenu } = await import('@tauri-apps/api/menu/submenu');
 
     const sep = () => PredefinedMenuItem.new({ item: 'Separator' });
     const check = (id: string, text: string, checked: boolean, action: () => void) =>
       CheckMenuItem.new({ id, text, checked, action });
+
+    // 语速放子菜单里给三个档位。原生菜单没有滑块，细调去设置窗 ——
+    // 这里只要「嫌慢/嫌快」一键能改。
+    const speedMenu = async () => {
+      const items = await Promise.all(
+        SPEECH_RATE_PRESETS.map((preset) =>
+          check(
+            `rate_${preset.value}`,
+            preset.label,
+            Math.abs(settings.speechRate - preset.value) < 0.03,
+            () => actions.onPatchSettings({ speechRate: preset.value }),
+          ),
+        ),
+      );
+      return Submenu.new({ id: 'speech_rate', text: '语速', items });
+    };
 
     const items = await Promise.all([
       MenuItem.new({ id: 'type', text: '打字跟她说…', action: actions.onType }),
@@ -42,6 +70,7 @@ export async function popupPetMenu(
       check('voice', '语音对话', settings.voiceEnabled, () =>
         actions.onPatchSettings({ voiceEnabled: !settings.voiceEnabled }),
       ),
+      speedMenu(),
       // 关掉持续聆听之后改为「长按她说话」，这样环境噪声完全进不来。
       check('listening', '持续聆听（关闭后长按她说话）', settings.listening, () =>
         actions.onPatchSettings({ listening: !settings.listening }),

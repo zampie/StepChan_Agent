@@ -30,10 +30,16 @@ import { DROP_COOLDOWN_MS, DROP_LIMIT } from '../apps/web/src/awareness/DropReac
 import {
   IDLE_AFTER_MS,
   MOVE_INTERVAL_MS,
-  NAP_AFTER_MS,
+  napAfterMs,
 } from '../apps/web/src/awareness/IdleBehavior';
 import { defaultSettings, settingsSchema } from '../shared/desktop';
 import { spots } from '../shared/pet';
+
+/**
+ * 打盹阈值现在由 settings.sleepAfterMinutes 决定（用户要求「5 分钟、可配置」），
+ * 所以测试从设置算而不是用固定常量 —— 否则改了默认值测试会假阳性通过。
+ */
+const NAP_MS = napAfterMs(defaultSettings)!;
 
 // ---- 测试替身 ----
 // 全部用注入的时钟/随机源。这里**没有一行 sleep**，也没有假定时器库：
@@ -304,16 +310,43 @@ test('DropReactor 处理文字载荷', () => {
 
 // ---- IdleBehavior ----
 
-test('IdleBehavior 在 autonomy 关闭时完全惰性', () => {
+// 两个开关管不同的事：autonomy 管「自己挪位置」（会打扰人），
+// sleepAfterMinutes 管「到点打盹」（被动的）。用户要的是「安静但会睡」的桌宠，
+// 所以关掉 autonomy **不该**把打盹一起关掉。
+test('autonomy 关闭时不挪位置，但仍然会到点打盹', () => {
   const probe = makeProbe();
   const idle = new IdleBehavior({ probe, startedAt: 0, random: () => 0 });
   assert.equal(defaultSettings.autonomy, false, '自主行动默认必须关闭');
+  assert.ok(defaultSettings.sleepAfterMinutes > 0, '自动打盹默认必须开启');
 
   const off = settings({ autonomy: false });
-  for (let t = 0; t <= NAP_AFTER_MS * 2; t += 5000) {
+  const effects: string[] = [];
+  for (let t = 0; t <= NAP_MS * 2; t += 5000) {
+    for (const e of idle.tick(off, t)) effects.push(e.type);
+  }
+  assert.equal(effects.includes('move'), false, 'autonomy 关着绝不能挪窗口');
+  assert.ok(effects.includes('intent'), '到点应该产出打盹意图');
+  assert.equal(idle.phase, 'napping');
+});
+
+test('两个开关都关时才彻底惰性', () => {
+  const probe = makeProbe();
+  const idle = new IdleBehavior({ probe, startedAt: 0, random: () => 0 });
+  const off = settings({ autonomy: false, sleepAfterMinutes: 0 });
+  for (let t = 0; t <= NAP_MS * 2; t += 5000) {
     assert.deepEqual(idle.tick(off, t), [], `t=${t} 不该产出任何行为`);
   }
   assert.equal(idle.phase, 'active');
+});
+
+test('打盹阈值跟着 sleepAfterMinutes 走', () => {
+  const probe = makeProbe();
+  const idle = new IdleBehavior({ probe, startedAt: 0, random: () => 1 });
+  const quick = settings({ autonomy: false, sleepAfterMinutes: 1 });
+  idle.tick(quick, 59_000);
+  assert.notEqual(idle.phase, 'napping', '不到一分钟不该睡');
+  idle.tick(quick, 60_000);
+  assert.equal(idle.phase, 'napping', '到一分钟就该睡');
 });
 
 test('IdleBehavior 的 active → idle → napping → active 状态机', () => {
@@ -329,25 +362,25 @@ test('IdleBehavior 的 active → idle → napping → active 状态机', () => 
   idle.tick(on, IDLE_AFTER_MS);
   assert.equal(idle.phase, 'idle');
 
-  idle.tick(on, NAP_AFTER_MS - 1);
+  idle.tick(on, NAP_MS - 1);
   assert.equal(idle.phase, 'idle', '还没到打盹阈值');
 
-  const napping = idle.tick(on, NAP_AFTER_MS);
+  const napping = idle.tick(on, NAP_MS);
   assert.equal(idle.phase, 'napping');
   assert.equal(napping.length, 1);
   assert.equal(napping[0].type, 'intent');
   assert.equal(napping[0].type === 'intent' && napping[0].intent.kind, 'nap');
 
   // 打盹期间继续 tick 不再产出东西（不会每 5 秒喊一次"我困了"）。
-  assert.deepEqual(idle.tick(on, NAP_AFTER_MS + 5000), []);
-  assert.deepEqual(idle.tick(on, NAP_AFTER_MS + 60_000), []);
+  assert.deepEqual(idle.tick(on, NAP_MS + 5000), []);
+  assert.deepEqual(idle.tick(on, NAP_MS + 60_000), []);
 
   // 互动叫醒 → 产出 wake 意图，而且只产出一次。
-  const woke = idle.noteInteraction(NAP_AFTER_MS + 61_000);
+  const woke = idle.noteInteraction(NAP_MS + 61_000);
   assert.equal(idle.phase, 'active');
   assert.equal(woke.length, 1);
   assert.equal(woke[0].type === 'intent' && woke[0].intent.kind, 'wake');
-  assert.deepEqual(idle.noteInteraction(NAP_AFTER_MS + 62_000), [], '没在打盹时互动不产出 wake');
+  assert.deepEqual(idle.noteInteraction(NAP_MS + 62_000), [], '没在打盹时互动不产出 wake');
 });
 
 test('IdleBehavior 偶尔挪位置，受 MOVE_INTERVAL 和 reduceMotion 约束', () => {
@@ -359,7 +392,9 @@ test('IdleBehavior 偶尔挪位置，受 MOVE_INTERVAL 和 reduceMotion 约束',
     spot: 'bottom_right',
     random: seededRandom([0, 0, 0, 0, 0, 0]),
   });
-  const on = settings({ autonomy: true });
+  // 关掉打盹来隔离位移行为：默认 5 分钟的打盹阈值会在这条时间线中途
+  // 把状态推进到 napping，之后就不再产出位移了。
+  const on = settings({ autonomy: true, sleepAfterMinutes: 0 });
 
   const first = idle.tick(on, IDLE_AFTER_MS);
   assert.equal(first.length, 1);
@@ -379,12 +414,12 @@ test('IdleBehavior 偶尔挪位置，受 MOVE_INTERVAL 和 reduceMotion 约束',
   // reduceMotion：同样的时间线下一次都不挪，但状态机照常进入 idle。
   const still = new IdleBehavior({ probe, startedAt: 0, random: () => 0 });
   const reduced = settings({ autonomy: true, reduceMotion: true });
-  for (let t = IDLE_AFTER_MS; t < NAP_AFTER_MS; t += MOVE_INTERVAL_MS) {
+  for (let t = IDLE_AFTER_MS; t < NAP_MS; t += MOVE_INTERVAL_MS) {
     assert.deepEqual(still.tick(reduced, t), [], 'reduceMotion 下不许挪窗口');
   }
   assert.equal(still.phase, 'idle');
   // 但打盹还照常（表情变化不是位移）。
-  assert.equal(still.tick(reduced, NAP_AFTER_MS)[0]?.type, 'intent');
+  assert.equal(still.tick(reduced, NAP_MS)[0]?.type, 'intent');
 });
 
 test('IdleBehavior 在窗口隐藏/她在忙/用户打字时暂停，并且不积压空闲时间', () => {
@@ -393,13 +428,13 @@ test('IdleBehavior 在窗口隐藏/她在忙/用户打字时暂停，并且不�
   const on = settings({ autonomy: true });
 
   // 隐藏期间横跨远超打盹阈值的时间。
-  for (let t = 0; t <= NAP_AFTER_MS * 3; t += 10_000) {
+  for (let t = 0; t <= NAP_MS * 3; t += 10_000) {
     assert.deepEqual(idle.tick(on, t), [], '隐藏时必须暂停');
   }
   assert.equal(idle.phase, 'active');
 
   // 一显示出来不该立刻判定"已经空闲三十分钟"。
-  const shown = NAP_AFTER_MS * 3 + 10_000;
+  const shown = NAP_MS * 3 + 10_000;
   probe.state.visible = true;
   assert.deepEqual(idle.tick(on, shown), [], '刚显示出来的那一刻还不算空闲');
   assert.equal(idle.phase, 'active');
@@ -514,7 +549,8 @@ test('Awareness 门面路由意图、同步设置，stop 之后彻底安静', as
 
 test('Awareness 在 autonomy 打开时才挪窗口，并把位移下发给 desktop', async () => {
   let now = 0;
-  const desktop = fakeDesktop(settings({ autonomy: false }));
+  // 同上：这条用例测的是位移，把打盹关掉免得状态机先睡过去。
+  const desktop = fakeDesktop(settings({ autonomy: false, sleepAfterMinutes: 0 }));
   const awareness = new Awareness({
     desktop,
     probe: makeProbe(),
@@ -528,7 +564,7 @@ test('Awareness 在 autonomy 打开时才挪窗口，并把位移下发给 deskt
 
   await awareness.start();
   // autonomy 关着：无论过多久都不挪。
-  for (now = 0; now <= NAP_AFTER_MS; now += MOVE_INTERVAL_MS) {
+  for (now = 0; now <= NAP_MS; now += MOVE_INTERVAL_MS) {
     awareness.tick();
     await Promise.resolve();
   }
@@ -588,10 +624,10 @@ test('Awareness.notifyInteraction 唤醒并压住紧随其后的主动搭话', a
   await awareness.start();
 
   // 睡过去。
-  now = NAP_AFTER_MS;
+  now = NAP_MS;
   awareness.tick();
   await Promise.resolve();
-  now = NAP_AFTER_MS * 2;
+  now = NAP_MS * 2;
   awareness.tick();
   await Promise.resolve();
   assert.equal(awareness.idle.phase, 'napping');

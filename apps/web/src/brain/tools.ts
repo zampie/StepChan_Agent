@@ -16,6 +16,14 @@ export type ToolContext = {
   getSettings: () => Promise<Settings>;
   getCredentials: () => Promise<Credentials>;
   emit: (event: PetEvent) => void;
+  /**
+   * 本回合用户是否**真的**提出了挪动要求。
+   *
+   * 这是 move_to 的程序化闸门。不提供时按「没要求」处理（拒绝）——
+   * 默认安全的方向是不动，因为乱跳是用户实际抱怨过的问题。
+   * 判定放在调用方（它才知道用户这一轮说了什么），这里只负责执行拒绝。
+   */
+  movementRequested?: () => boolean;
 };
 
 /** 视觉模型请求的超时。截屏 + 推理不应该让她卡住超过这个时间。 */
@@ -51,6 +59,27 @@ export function createToolExecutor(context: ToolContext) {
         return openUrl(args as { url: string });
       case 'move_to':
         return moveTo(args as { spot: Spot });
+    }
+  }
+
+  // ---- move_to（程序化门控，见 ToolContext.movementRequested）----
+  async function moveTo(args: { spot: Spot }): Promise<ToolResult> {
+    // 闸门在最前面：用户没要求就直接拒，连 desktop 都不碰。
+    // 拒绝消息是给模型看的，要让她能如实向用户解释，而不是默默不动。
+    if (!context.movementRequested?.()) {
+      return fail(
+        '现在不能自己挪位置 —— 只有用户明确让你让开或指定位置时才可以。' +
+          '不要声称自己挪过了，如实告诉用户他可以直接拖你，或者在右键菜单里选「让一让」。',
+      );
+    }
+    if (!context.desktop.available) {
+      return fail('调试环境里挪不动窗口。如实告诉用户。');
+    }
+    try {
+      await context.desktop.moveToSpot(args.spot);
+      return ok(`已经挪到${args.spot}了。`);
+    } catch (error) {
+      return fail(`挪不过去：${error instanceof Error ? error.message : '未知错误'}`);
     }
   }
 
@@ -277,18 +306,6 @@ export function createToolExecutor(context: ToolContext) {
     );
   }
 
-  // ---- move_to ----
-  async function moveTo(args: { spot: Spot }): Promise<ToolResult> {
-    if (!context.desktop.available) {
-      return fail('调试环境里挪不动窗口。如实告诉用户。');
-    }
-    try {
-      await context.desktop.moveToSpot(args.spot);
-      return ok(`已经挪到 ${args.spot} 了。短短说一句就行。`);
-    } catch (error) {
-      return fail(`挪不过去：${error instanceof Error ? error.message : '未知错误'}。`);
-    }
-  }
 
   return {
     execute,

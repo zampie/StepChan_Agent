@@ -1,5 +1,9 @@
-// WAV → PCM16。播放侧（voice/SpeechStream.ts）只吃 base64 的裸 PCM16，
-// 而 /v1/audio/speech 返回的是 WAV 容器，所以要先剥壳。
+// WAV ↔ PCM16。两个方向都在这里：
+// - **解码**（下行）：播放侧（voice/SpeechStream.ts）只吃 base64 的裸 PCM16，
+//   而 /v1/audio/speech 返回的是 WAV 容器，所以要先剥壳。
+// - **编码**（上行）：MicStream 出的是裸 PCM16 帧，而 /v1/audio/asr/sse 要一个
+//   完整的 WAV（见 ./asr.ts）。编码侧我们自己拼头，所以可以是标准的 44 字节布局 ——
+//   下面那个「data 块不在偏移 44」的坑只存在于解码侧。
 //
 // **这里有个实测的坑：data 块不在偏移 44。** StepFun 的 WAV 在 fmt 之后还塞了一个
 // 26 字节的 LIST 块，实际块布局是：
@@ -105,9 +109,8 @@ export function resample(samples: Int16Array, from: number, to: number): Int16Ar
   return out;
 }
 
-/** PCM16 → base64，喂给 SpeechStream.enqueue。分块避免超长 apply 爆栈。 */
-export function pcm16ToBase64(samples: Int16Array): string {
-  const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+/** 任意字节 → base64。分块避免超长 apply 爆栈（30 秒录音有 1.4MB）。 */
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -115,4 +118,77 @@ export function pcm16ToBase64(samples: Int16Array): string {
   }
   // btoa 在 webview 和 Node 里都有。
   return btoa(binary);
+}
+
+/** base64 → 字节。MicStream 给的是 base64 帧，攒 WAV 前要先还原。 */
+export function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** PCM16 → base64，喂给 SpeechStream.enqueue。 */
+export function pcm16ToBase64(samples: Int16Array): string {
+  return bytesToBase64(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
+}
+
+/** WAV 头的固定长度。编码侧用标准布局：RIFF + fmt(16) + data，没有 LIST 块。 */
+const WAV_HEADER_BYTES = 44;
+
+/**
+ * 单声道 PCM16 → 一个完整的 WAV 文件。
+ *
+ * 为什么编码侧敢用 44 字节的教科书布局，而解码侧不敢（见文件开头）：头是我们自己
+ * 拼的，没有谁会往中间插 LIST 块。而且 ASR 服务端按 fmt 里声明的采样率解，所以
+ * 这里的 sampleRate 必须是**实际**采样率 —— 写错不会报错，只会让她听到一句变调的话，
+ * 转写结果莫名其妙。
+ */
+export function encodeWav(samples: Int16Array, sampleRate: number): Uint8Array {
+  const dataBytes = samples.length * 2;
+  const out = new Uint8Array(WAV_HEADER_BYTES + dataBytes);
+  const view = new DataView(out.buffer);
+  const tag = (offset: number, text: string): void => {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  tag(0, 'RIFF');
+  view.setUint32(4, WAV_HEADER_BYTES - 8 + dataBytes, true); // RIFF 块长度 = 文件长 - 8
+  tag(8, 'WAVE');
+  tag(12, 'fmt ');
+  view.setUint32(16, 16, true); // fmt 块长度
+  view.setUint16(20, 1, true); // audioFormat = PCM
+  view.setUint16(22, 1, true); // 单声道
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byteRate = rate * 声道 * 2 字节
+  view.setUint16(32, 2, true); // blockAlign
+  view.setUint16(34, 16, true); // bitsPerSample
+  tag(36, 'data');
+  view.setUint32(40, dataBytes, true);
+  // 逐样本写，不走 Int16Array 视图：samples 的 byteOffset 不保证 2 字节对齐。
+  for (let i = 0; i < samples.length; i++) {
+    view.setInt16(WAV_HEADER_BYTES + i * 2, samples[i], true);
+  }
+  return out;
+}
+
+/**
+ * 把一串 PCM16 字节块（MicStream 的帧）拼成一个 Int16Array。
+ *
+ * 帧长固定 1920 字节（24000 × 0.04 × 2），所以正常不会出现奇数字节；但万一出现，
+ * 落单的那个字节必须丢掉而不是补 0 —— 补 0 会让后面所有样本错位一个字节，
+ * 整段变成白噪声（和解码侧那个坑同一个教训）。
+ */
+export function concatPcm16(chunks: readonly Uint8Array[]): Int16Array {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const samples = new Int16Array(total >> 1);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true);
+  return samples;
 }

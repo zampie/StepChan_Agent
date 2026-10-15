@@ -1,16 +1,34 @@
-// chat 智能模式的测试：SSE 解析、tool_call 增量聚合、切句、WAV 剥壳、
-// 对话循环（工具执行 / 每轮上限 / 幂等 / 打断 / 历史裁剪）、按句 TTS 的取消语义，
+// chat 智能模式的测试：SSE 解析、tool_call 增量聚合、切句、WAV 剥壳与封装、
+// 对话循环（工具执行 / 每轮上限 / 幂等 / 打断 / 历史裁剪）、按句 TTS 的取消语义、
+// 按住说话（采集下限 / 取消语义 / ASR 请求形状），
 // 以及「ChatBrain 和 Brain 的公开面是否还一致」。
 //
-// 这些用例全部离线跑：所有网络调用都走注入的假 fetch。真机验证在
-// scripts/chat-probe.ts（需要真 key，会花钱）。
+// 这些用例全部离线跑：所有网络调用都走注入的假 fetch，麦克风走注入的假采集。
+// 真机验证在 scripts/chat-probe.ts 和 scripts/asr-probe.ts（需要真 key，会花钱）。
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 
 import { readSseData } from '../apps/web/src/brain/chat/sse';
 import { streamChatCompletion, ChatHttpError } from '../apps/web/src/brain/chat/stream';
 import { SentenceBuffer, spokenText } from '../apps/web/src/brain/chat/sentences';
-import { decodeWav, pcm16ToBase64, resample, toMono } from '../apps/web/src/brain/chat/wav';
+import {
+  base64ToBytes,
+  bytesToBase64,
+  concatPcm16,
+  decodeWav,
+  encodeWav,
+  pcm16ToBase64,
+  resample,
+  toMono,
+} from '../apps/web/src/brain/chat/wav';
+import { transcribePcm16, AsrError, ASR_MODEL, ASR_HOTWORDS } from '../apps/web/src/brain/chat/asr';
+import {
+  PushToTalkRecorder,
+  MAX_PUSH_TO_TALK_MS,
+  type MicLike,
+} from '../apps/web/src/brain/chat/listen';
+import type { MicStreamEvents } from '../apps/web/src/voice/MicStream';
+import { MIN_PUSH_TO_TALK_FRAMES } from '../apps/web/src/voice/RealtimeSession';
 import { ChatSession, MAX_TOOL_CALLS_PER_TURN } from '../apps/web/src/brain/chat/ChatSession';
 import { SpeechSynthesizer, type SpeechSink } from '../apps/web/src/brain/chat/tts';
 import { buildChatInstructions } from '../apps/web/src/brain/chat/persona';
@@ -500,6 +518,506 @@ describe('decodeWav：/v1/audio/speech 的壳', () => {
   });
 });
 
+// ------------------------------------------------- 编码侧：PCM16 → WAV（给 ASR）
+
+describe('encodeWav：攒麦克风的帧交给 /v1/audio/asr/sse', () => {
+  test('标准 44 字节头，自己的 decodeWav 能原样读回来', () => {
+    const samples = Int16Array.from([0, 1000, -1000, 32767, -32768, 7]);
+    const wav = encodeWav(samples, 24000);
+    assert.equal(wav.length, 44 + samples.length * 2);
+    const view = new DataView(wav.buffer);
+    // 编码侧用教科书布局（没有 LIST 块），所以 data 确实在 36。
+    assert.equal(String.fromCharCode(...wav.subarray(36, 40)), 'data');
+    assert.equal(view.getUint32(4, true), wav.length - 8, 'RIFF 长度必须是文件长 -8');
+    assert.equal(view.getUint32(40, true), samples.length * 2);
+    assert.equal(view.getUint16(22, true), 1, '单声道');
+    assert.equal(view.getUint32(28, true), 24000 * 2, 'byteRate');
+    assert.equal(view.getUint16(32, true), 2, 'blockAlign');
+    const decoded = decodeWav(wav);
+    assert.deepEqual([...decoded.samples], [...samples]);
+    assert.equal(decoded.sampleRate, 24000);
+    assert.equal(decoded.channels, 1);
+  });
+
+  test('采样率写进 fmt —— 写错不会报错，只会让转写莫名其妙', () => {
+    assert.equal(decodeWav(encodeWav(Int16Array.from([1, 2]), 16000)).sampleRate, 16000);
+  });
+
+  test('空样本也能拼出合法 WAV（不该抛）', () => {
+    const wav = encodeWav(new Int16Array(0), 24000);
+    assert.equal(wav.length, 44);
+    assert.equal(new DataView(wav.buffer).getUint32(40, true), 0);
+  });
+
+  test('concatPcm16 拼帧：按小端读，落单的字节丢掉而不是补 0', () => {
+    const a = Uint8Array.from([0x01, 0x00, 0xff, 0x7f]); // 1, 32767
+    const b = Uint8Array.from([0x00, 0x80]); // -32768
+    assert.deepEqual([...concatPcm16([a, b])], [1, 32767, -32768]);
+    // 奇数字节：最后那个字节必须丢掉 —— 补 0 会让后面全部错位成白噪声。
+    assert.deepEqual([...concatPcm16([a, Uint8Array.from([0x05])])], [1, 32767]);
+    assert.deepEqual([...concatPcm16([])], []);
+  });
+
+  test('base64ToBytes / bytesToBase64 往返（MicStream 给的就是 base64 帧）', () => {
+    const bytes = new Uint8Array(1920);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7) % 256;
+    assert.deepEqual([...base64ToBytes(bytesToBase64(bytes))], [...bytes]);
+  });
+});
+
+// ---------------------------------------------------------------- ASR：一次性识别
+
+/** 造一段 ASR 的 SSE 响应。 */
+function asrSse(events: object[], withDone = true): ReadableStream<Uint8Array> {
+  const frames = events.map((event) => `data: ${JSON.stringify(event)}\n\n`);
+  if (withDone) frames.push('data: [DONE]\n\n');
+  return sseBody(frames);
+}
+
+type FakeAsrOptions = {
+  /** 最终文本。null = 回一个 transcript.text.done 但 text 为空。 */
+  text?: string | null;
+  status?: number;
+  delayMs?: number;
+  /** 完全自定义事件序列（覆盖 text）。 */
+  events?: object[];
+  /** 不发 [DONE]，用来模拟流中断。 */
+  withDone?: boolean;
+};
+
+function fakeAsr(options: FakeAsrOptions = {}): {
+  fetchImpl: typeof fetch;
+  requests: Record<string, unknown>[];
+  readonly calls: number;
+  readonly aborted: number;
+} {
+  const requests: Record<string, unknown>[] = [];
+  const state = { aborted: 0 };
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (options.delayMs) {
+      await new Promise<void>((resolve, reject) => {
+        const handle = setTimeout(resolve, options.delayMs);
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(handle);
+          state.aborted++;
+          reject(Object.assign(Error('aborted'), { name: 'AbortError' }));
+        });
+      });
+    }
+    if (options.status && options.status !== 200) {
+      return new Response('nope', { status: options.status });
+    }
+    const events = options.events ?? [
+      { type: 'transcript.text.delta', text: '现在' },
+      {
+        type: 'transcript.text.done',
+        text: options.text === null ? '' : (options.text ?? '现在几点了'),
+      },
+    ];
+    return new Response(asrSse(events, options.withDone ?? true), { status: 200 });
+  }) as unknown as typeof fetch;
+  return {
+    fetchImpl,
+    requests,
+    get calls() {
+      return requests.length;
+    },
+    get aborted() {
+      return state.aborted;
+    },
+  };
+}
+
+/** 一帧 40ms 的 PCM16（内容无关，长度相关）。 */
+const FRAME_SAMPLES = 24000 * 0.04;
+function frameBase64(): string {
+  const bytes = new Uint8Array(FRAME_SAMPLES * 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 13) % 256;
+  return bytesToBase64(bytes);
+}
+
+describe('transcribePcm16：/v1/audio/asr/sse 的请求形状与 SSE 解析', () => {
+  test('请求体是嵌套的，音频是能解回 24k 单声道的 WAV', async () => {
+    const asr = fakeAsr({ text: '把你挪到右下角' });
+    const samples = new Int16Array(FRAME_SAMPLES * 5);
+    for (let i = 0; i < samples.length; i++) samples[i] = (i % 2000) - 1000;
+    const text = await transcribePcm16({
+      apiKey: 'k',
+      samples,
+      sampleRate: 24000,
+      fetchImpl: asr.fetchImpl,
+    });
+    assert.equal(text, '把你挪到右下角');
+    // 这个形状是实测跑通的那一版（见 asr.ts 的注释），结构错一层就是 400。
+    const body = asr.requests[0] as {
+      audio: {
+        data: string;
+        input: {
+          transcription: { model: string; language: string; hotwords: string[] };
+          format: { type: string };
+        };
+      };
+    };
+    assert.equal(body.audio.input.transcription.model, ASR_MODEL);
+    assert.equal(body.audio.input.transcription.language, 'zh');
+    assert.deepEqual(body.audio.input.transcription.hotwords, [...ASR_HOTWORDS]);
+    assert.equal(body.audio.input.format.type, 'wav');
+    const decoded = decodeWav(base64ToBytes(body.audio.data));
+    assert.equal(decoded.sampleRate, 24000);
+    assert.equal(decoded.channels, 1);
+    assert.deepEqual([...decoded.samples], [...samples], '上行的音频必须和采到的一模一样');
+  });
+
+  test('只认 transcript.text.done，delta 不当最终结果', async () => {
+    const asr = fakeAsr({
+      events: [
+        { type: 'transcript.text.delta', text: '现在几' },
+        { type: 'transcript.text.done', text: '  现在几点了  ' },
+        { type: 'transcript.text.done', text: '不该读到这条' },
+      ],
+    });
+    const text = await transcribePcm16({
+      apiKey: 'k',
+      samples: new Int16Array(FRAME_SAMPLES * 5),
+      sampleRate: 24000,
+      fetchImpl: asr.fetchImpl,
+    });
+    assert.equal(text, '现在几点了');
+  });
+
+  test('听了但没听出字 → 空字符串，不是异常（用户只是说得太轻）', async () => {
+    const asr = fakeAsr({ text: null });
+    assert.equal(
+      await transcribePcm16({
+        apiKey: 'k',
+        samples: new Int16Array(FRAME_SAMPLES * 5),
+        sampleRate: 24000,
+        fetchImpl: asr.fetchImpl,
+      }),
+      '',
+    );
+  });
+
+  test('error 事件 / 流断在 done 之前 / HTTP 失败都抛 AsrError，消息能直接给用户看', async () => {
+    const base = { apiKey: 'k', samples: new Int16Array(FRAME_SAMPLES * 5), sampleRate: 24000 };
+    await assert.rejects(
+      () =>
+        transcribePcm16({
+          ...base,
+          fetchImpl: fakeAsr({ events: [{ type: 'error', error: { message: 'bad audio' } }] })
+            .fetchImpl,
+        }),
+      (error: unknown) => error instanceof AsrError && /识别失败.*bad audio/.test(error.message),
+    );
+    await assert.rejects(
+      () =>
+        transcribePcm16({
+          ...base,
+          fetchImpl: fakeAsr({
+            events: [{ type: 'transcript.text.delta', text: '半' }],
+            withDone: false,
+          }).fetchImpl,
+        }),
+      (error: unknown) => error instanceof AsrError && /中断/.test(error.message),
+    );
+    await assert.rejects(
+      () => transcribePcm16({ ...base, fetchImpl: fakeAsr({ status: 500 }).fetchImpl }),
+      (error: unknown) => error instanceof AsrError && error.status === 500,
+    );
+  });
+
+  test('外部 signal 能真的废掉在途请求', async () => {
+    const asr = fakeAsr({ delayMs: 500 });
+    const abort = new AbortController();
+    const pending = transcribePcm16({
+      apiKey: 'k',
+      samples: new Int16Array(FRAME_SAMPLES * 5),
+      sampleRate: 24000,
+      signal: abort.signal,
+      fetchImpl: asr.fetchImpl,
+    });
+    abort.abort();
+    await assert.rejects(() => pending);
+    assert.equal(asr.aborted, 1, '不能只是忽略结果 —— 请求要真的掐掉');
+  });
+});
+
+// ------------------------------------------------------- 按住说话：采集 → 转写
+
+type FakeMic = {
+  create: (events: MicStreamEvents) => MicLike;
+  feed: (frames: number) => void;
+  reportError: (message: string) => void;
+  releaseStart: () => void;
+  readonly starts: number;
+  readonly stops: number;
+};
+
+/** 假麦克风。holdStart：start() 卡住不返回，用来模拟权限框弹着。 */
+function fakeMic(options: { failWith?: unknown; holdStart?: boolean } = {}): FakeMic {
+  const state = { starts: 0, stops: 0, release: () => {} };
+  let events: MicStreamEvents | null = null;
+  const frame = frameBase64();
+  const mic: MicLike = {
+    async start() {
+      state.starts++;
+      if (options.holdStart) {
+        await new Promise<void>((resolve) => {
+          state.release = resolve;
+        });
+      }
+      if (options.failWith) throw options.failWith;
+    },
+    stop() {
+      state.stops++;
+    },
+  };
+  return {
+    create: (e) => {
+      events = e;
+      return mic;
+    },
+    feed(frames) {
+      for (let i = 0; i < frames; i++) events?.onFrame(frame);
+    },
+    reportError(message) {
+      events?.onError?.(message);
+    },
+    releaseStart() {
+      state.release();
+    },
+    get starts() {
+      return state.starts;
+    },
+    get stops() {
+      return state.stops;
+    },
+  };
+}
+
+type RecorderHarness = {
+  recorder: PushToTalkRecorder;
+  mic: FakeMic;
+  asr: ReturnType<typeof fakeAsr>;
+  utterances: string[];
+  errors: string[];
+  notices: string[];
+  states: string[];
+};
+
+function recorderHarness(
+  asrOptions: FakeAsrOptions = {},
+  micOptions: { failWith?: unknown; holdStart?: boolean } = {},
+): RecorderHarness {
+  const mic = fakeMic(micOptions);
+  const asr = fakeAsr(asrOptions);
+  const utterances: string[] = [];
+  const errors: string[] = [];
+  const notices: string[] = [];
+  const states: string[] = [];
+  const recorder = new PushToTalkRecorder({
+    getApiKey: async () => 'k',
+    createMic: mic.create,
+    fetchImpl: asr.fetchImpl,
+    events: {
+      onUtterance: (text) => utterances.push(text),
+      onError: (message) => errors.push(message),
+      onNotice: (message) => notices.push(message),
+      onState: (state) => states.push(state),
+    },
+  });
+  return { recorder, mic, asr, utterances, errors, notices, states };
+}
+
+describe('PushToTalkRecorder：长按采集 → 松手转写', () => {
+  test('一次正常长按：listening → transcribing → 一句话', async () => {
+    const h = recorderHarness({ text: '现在几点了' });
+    await h.recorder.begin();
+    assert.equal(h.recorder.active, true, '按着的时候必须如实反映');
+    h.mic.feed(20);
+    h.recorder.end();
+    assert.equal(h.recorder.active, false);
+    await settle(30);
+    assert.deepEqual(h.utterances, ['现在几点了']);
+    assert.deepEqual(h.states, ['listening', 'transcribing']);
+    assert.deepEqual(h.errors, []);
+    // 上行音频的样本数 = 帧数 × 每帧样本数（攒帧的拼接没有丢帧）。
+    const body = h.asr.requests[0] as { audio: { data: string } };
+    assert.equal(decodeWav(base64ToBytes(body.audio.data)).samples.length, 20 * FRAME_SAMPLES);
+    assert.equal(h.mic.stops >= 1, true, '松手必须放掉麦克风');
+    h.recorder.dispose();
+  });
+
+  test('权限只在第一次长按时申请，不在构造时', async () => {
+    const h = recorderHarness();
+    assert.equal(h.mic.starts, 0, '构造录音器不该碰麦克风');
+    await h.recorder.begin();
+    assert.equal(h.mic.starts, 1);
+    h.recorder.dispose();
+  });
+
+  test('短于下限（4 帧）的误触：静默丢弃，不发请求也不报错', async () => {
+    const h = recorderHarness();
+    await h.recorder.begin();
+    h.mic.feed(MIN_PUSH_TO_TALK_FRAMES - 1);
+    h.recorder.end();
+    await settle(30);
+    assert.equal(h.asr.calls, 0, '空/过短的音频不该提交');
+    assert.deepEqual(h.errors, []);
+    assert.deepEqual(h.notices, [], '误触连提示都不该有');
+    assert.deepEqual(h.states, ['listening', 'idle']);
+    assert.equal(h.recorder.active, false);
+    h.recorder.dispose();
+  });
+
+  test('刚好到下限就提交 —— 下限和 realtime 侧是同一个常量', async () => {
+    const h = recorderHarness({ text: '嗯' });
+    await h.recorder.begin();
+    h.mic.feed(MIN_PUSH_TO_TALK_FRAMES);
+    h.recorder.end();
+    await settle(30);
+    assert.equal(h.asr.calls, 1);
+    assert.deepEqual(h.utterances, ['嗯']);
+    h.recorder.dispose();
+  });
+
+  test('cancel 废掉在途转写：结果不会迟到几秒后突然发出去', async () => {
+    const h = recorderHarness({ text: '太晚了', delayMs: 200 });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    assert.equal(h.recorder.transcribing, true);
+    await settle(10); // 等请求真的发出去，不然测的是「还没发」而不是「废掉了」
+    assert.equal(h.asr.calls, 1);
+    h.recorder.cancel();
+    await settle(300);
+    assert.deepEqual(h.utterances, [], '取消之后不能再发起一轮对话');
+    assert.deepEqual(h.errors, [], '取消是正常操作，不是故障');
+    assert.equal(h.asr.aborted, 1, '请求要真的掐掉，不只是忽略结果');
+    h.recorder.dispose();
+  });
+
+  test('松手后立刻取消：请求还没发出去就被废掉，一个字节都不上行', async () => {
+    const h = recorderHarness({ text: '太晚了', delayMs: 200 });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    h.recorder.cancel(); // 同一个 tick 里取消
+    await settle(300);
+    assert.equal(h.asr.calls, 0);
+    assert.deepEqual(h.utterances, []);
+    h.recorder.dispose();
+  });
+
+  test('新一次长按作废上一次在途的转写（用户重按就是不要上一句了）', async () => {
+    const h = recorderHarness({ text: '上一句', delayMs: 200 });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(10);
+    await h.recorder.begin();
+    assert.equal(h.asr.aborted, 1);
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(400);
+    assert.deepEqual(h.utterances, ['上一句'], '只该有第二次那一段的结果');
+    h.recorder.dispose();
+  });
+
+  test('dispose 放掉麦克风并废掉在途转写', async () => {
+    const h = recorderHarness({ delayMs: 200 });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(10);
+    h.recorder.dispose();
+    await settle(300);
+    assert.deepEqual(h.utterances, []);
+    assert.equal(h.asr.aborted, 1);
+    assert.equal(h.mic.stops >= 1, true);
+    // dispose 之后再按也不该开麦。
+    await h.recorder.begin();
+    assert.equal(h.recorder.active, false);
+  });
+
+  test('麦克风打不开：给可操作的提示，状态落回 idle，不卡在「正在听」', async () => {
+    const h = recorderHarness({}, { failWith: new DOMException('denied', 'NotAllowedError') });
+    await h.recorder.begin();
+    assert.equal(h.recorder.active, false);
+    assert.equal(h.errors.length, 1);
+    assert.match(h.errors[0], /授权/);
+    assert.deepEqual(h.states, ['idle']);
+    assert.equal(h.mic.stops >= 1, true, '失败路径也要放掉麦克风');
+    h.recorder.dispose();
+  });
+
+  test('MicStream 自己报过错就不重复报一遍', async () => {
+    const h = recorderHarness({}, { failWith: Error('boom') });
+    const pending = h.recorder.begin();
+    h.mic.reportError('麦克风被别的程序占用了。');
+    await pending;
+    assert.deepEqual(h.errors, ['麦克风被别的程序占用了。']);
+    h.recorder.dispose();
+  });
+
+  test('权限框还弹着用户就松手了：放掉麦克风，不提交', async () => {
+    const h = recorderHarness({}, { holdStart: true });
+    const pending = h.recorder.begin();
+    h.recorder.end();
+    h.mic.releaseStart();
+    await pending;
+    await settle(30);
+    assert.equal(h.asr.calls, 0);
+    assert.equal(h.mic.stops >= 1, true);
+    assert.equal(h.states.includes('listening'), false, '人都松手了，不该再显示「正在听」');
+    h.recorder.dispose();
+  });
+
+  test('到 30 秒上限自动提交，不静默丢掉也不无限吃内存', async () => {
+    const h = recorderHarness({ text: '说了很久' });
+    await h.recorder.begin();
+    h.mic.feed(MAX_PUSH_TO_TALK_MS / 40);
+    await settle(30);
+    assert.equal(h.asr.calls, 1, '到上限要自己提交，不等松手');
+    assert.equal(h.recorder.active, false);
+    assert.equal(h.notices.length, 1);
+    assert.match(h.notices[0], /30 秒/);
+    // 再喂帧不该又攒一段出来。
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(30);
+    assert.equal(h.asr.calls, 1);
+    h.recorder.dispose();
+  });
+
+  test('没听清（服务端回空文本）→ notice，不是红框报错', async () => {
+    const h = recorderHarness({ text: null });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(30);
+    assert.deepEqual(h.utterances, []);
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.notices.length, 1);
+    assert.match(h.notices[0], /没听清/);
+    assert.equal(h.states.at(-1), 'idle');
+    h.recorder.dispose();
+  });
+
+  test('识别失败 → error 事件，状态落回 idle', async () => {
+    const h = recorderHarness({ status: 500 });
+    await h.recorder.begin();
+    h.mic.feed(10);
+    h.recorder.end();
+    await settle(30);
+    assert.equal(h.errors.length, 1);
+    assert.match(h.errors[0], /语音识别暂时不可用（500）/);
+    assert.equal(h.states.at(-1), 'idle');
+    h.recorder.dispose();
+  });
+});
+
 // ---------------------------------------------------------------- 假桌面
 
 function fakeDesktop(overrides: Partial<Settings> = {}): Desktop & { settings: Settings } {
@@ -513,6 +1031,22 @@ function fakeDesktop(overrides: Partial<Settings> = {}): Desktop & { settings: S
         realtimeModel: 'r',
         visionModel: 'v',
         chatModel: 'step-3.7-flash',
+      };
+    },
+    async credentialsStatus() {
+      return {
+        configured: true,
+        fingerprint: 'sk-fak…fake',
+        source: '/tmp/.env',
+        userPath: '/tmp/.stepchan/.env',
+      };
+    },
+    async setApiKey() {
+      return {
+        configured: true,
+        fingerprint: 'sk-new…key1',
+        source: '/tmp/.stepchan/.env',
+        userPath: '/tmp/.stepchan/.env',
       };
     },
     async setHitRegions() {},
@@ -1039,6 +1573,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'yuanqishaonv',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1060,6 +1595,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => voice,
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1081,6 +1617,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1102,6 +1639,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1128,6 +1666,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl,
     });
@@ -1145,6 +1684,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       onError: (message) => errors.push(message),
       fetchImpl: tts.fetchImpl,
@@ -1173,6 +1713,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       onError: (message) => errors.push(message),
       fetchImpl,
@@ -1192,6 +1733,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1207,6 +1749,7 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
+      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1236,8 +1779,15 @@ describe('buildChatInstructions：公共人设 + chat 模式补充', () => {
     assert.match(text, /拒绝原因照实说给用户/);
   });
 
-  test('说明这一版听不到声音，避免她说「我听你的声音有点累」', () => {
-    assert.match(buildChatInstructions(context), /听不到/);
+  test('说明她拿到的只是文字（听不到语气），但不假设用户是在打字', () => {
+    const text = buildChatInstructions(context);
+    assert.match(text, /永远是文字/);
+    assert.match(text, /长按你说话/, '接上按住说话之后不能再说「只接文字输入」');
+    assert.doesNotMatch(
+      text,
+      /再打一次/,
+      '用户可能是说出来的 —— 让他「再打一次」就是前一版留下的 bug',
+    );
   });
 
   test('隐私开关状态照旧体现在提示里', () => {
@@ -1282,12 +1832,16 @@ function fakeAudio(): {
   };
 }
 
-/** 让 ChatBrain 的两种请求（chat / tts）各走各的假实现。 */
-function brainFetch(turns: Turn[]): typeof fetch {
+/** 让 ChatBrain 的三种请求（chat / tts / asr）各走各的假实现。 */
+function brainFetch(turns: Turn[], asr?: ReturnType<typeof fakeAsr>): typeof fetch {
   const chat = scriptedFetch(turns);
   const tts = fakeTts();
   return (async (url: unknown, init?: RequestInit) => {
     if (String(url).includes('/audio/speech')) return tts.fetchImpl(url as string, init);
+    if (String(url).includes('/audio/asr')) {
+      if (!asr) throw Error('这个用例没准备假 ASR');
+      return asr.fetchImpl(url as string, init);
+    }
     return chat.fetchImpl(url as string, init);
   }) as unknown as typeof fetch;
 }
@@ -1392,40 +1946,180 @@ describe('ChatBrain：与 Brain 公开面一致的另一实现', () => {
     await brain.dispose();
   });
 
-  test('enableMic 如实说「这一版听不到」，不是静默空操作', async () => {
+  test('enableMic：持续聆听没有，但如实告知可以长按说话', async () => {
     const brain = new ChatBrain({ desktop: fakeDesktop(), createAudio: fakeAudio().create });
     const events: PetEvent[] = [];
     brain.on((e) => events.push(e));
     await brain.enableMic();
     assert.ok(
-      events.some((e) => e.type === 'error' && /听你说话/.test(e.message)),
-      '用户点了麦克风就得知道这个模式用不了',
+      events.some((e) => e.type === 'notice' && /长按/.test(e.message)),
+      '用户点了麦克风就得知道这个模式只能按住说',
+    );
+    assert.equal(
+      events.some((e) => e.type === 'error'),
+      false,
+      '能力说明不该走 error 通道（UI 给 error 配的是告警样式）',
     );
     brain.disableMic(); // 不该抛
     await brain.dispose();
   });
 
-  test('按住说话是明确的空操作：如实告知、pushToTalkActive 恒为 false', async () => {
-    const brain = new ChatBrain({ desktop: fakeDesktop(), createAudio: fakeAudio().create });
+  test('按住说话：长按 → 转写 → 自动走打字那条链（含 user_transcript）', async () => {
+    const audio = fakeAudio();
+    const mic = fakeMic();
+    const asr = fakeAsr({ text: '现在几点了' });
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: audio.create,
+      createMic: mic.create,
+      fetchImpl: brainFetch([{ chunks: [contentChunk('下午三点。'), doneChunk()] }], asr),
+    });
     const events: PetEvent[] = [];
     brain.on((e) => events.push(e));
+    await brain.start(false);
+    assert.equal(mic.starts, 0, '麦克风权限不该在 start() 里申请');
+
+    await brain.beginPushToTalk();
+    assert.equal(brain.pushToTalkActive, true, 'pushToTalkActive 要如实反映状态');
+    assert.equal(mic.starts, 1, '权限在第一次长按时才申请');
+    mic.feed(20);
+    brain.endPushToTalk();
     assert.equal(brain.pushToTalkActive, false);
-    await assert.doesNotReject(() => brain.beginPushToTalk());
-    assert.equal(brain.pushToTalkActive, false, '按下也不该进入「正在说话」状态');
-    // 用 notice 而不是 error：这是能力说明，不是故障。UI 给 error 配告警样式，
-    // 用红框显示「本模式只支持打字」会让用户以为出了问题。
+    await settle(150);
+
+    // 气泡要显示用户说了什么 —— 否则按住说完界面上看不到自己说了啥。
     assert.ok(
-      events.some((e) => e.type === 'notice' && /只支持打字/.test(e.message)),
-      '长按是明确的用户动作，静默失败会被当成 bug',
+      events.some((e) => e.type === 'user_transcript' && e.text === '现在几点了' && e.final),
+      '缺 user_transcript(final)',
     );
+    assert.deepEqual(
+      brain.transcript.map((e) => [e.role, e.text]),
+      [
+        ['user', '现在几点了'],
+        ['pet', '下午三点。'],
+      ],
+    );
+    assert.equal(audio.clips.length, 1, '语音输入也该照常出声');
+    assert.ok(events.some((e) => e.type === 'activity' && e.value === 'listening'));
     assert.equal(
       events.some((e) => e.type === 'error'),
       false,
-      '能力说明不该走 error 通道',
     );
-    const before = events.length;
-    brain.endPushToTalk(); // 松手不该再弹一次
-    assert.equal(events.length, before);
+    await brain.dispose();
+    assert.equal(mic.stops >= 1, true, 'dispose 必须放掉麦克风');
+  });
+
+  test('长按太短：静默丢弃，不提交也不弹提示', async () => {
+    const mic = fakeMic();
+    const asr = fakeAsr();
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: fakeAudio().create,
+      createMic: mic.create,
+      fetchImpl: brainFetch([], asr),
+    });
+    const events: PetEvent[] = [];
+    brain.on((e) => events.push(e));
+    await brain.start(false);
+    await brain.beginPushToTalk();
+    mic.feed(MIN_PUSH_TO_TALK_FRAMES - 1);
+    brain.endPushToTalk();
+    await settle(60);
+    assert.equal(asr.calls, 0);
+    assert.equal(brain.transcript.length, 0);
+    assert.equal(
+      events.some((e) => e.type === 'error' || e.type === 'notice'),
+      false,
+      '误触不该让她说话也不该报错',
+    );
+    await brain.dispose();
+  });
+
+  test('会话没起来就长按也能用（和 Brain 的行为一致）', async () => {
+    const mic = fakeMic();
+    const asr = fakeAsr({ text: '你好呀' });
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: fakeAudio().create,
+      createMic: mic.create,
+      fetchImpl: brainFetch([{ chunks: [contentChunk('嗨！'), doneChunk()] }], asr),
+    });
+    await brain.beginPushToTalk();
+    assert.equal(brain.running, true, '长按该把会话先起起来');
+    mic.feed(10);
+    brain.endPushToTalk();
+    await settle(150);
+    assert.equal(brain.transcript.at(-1)?.text, '嗨！');
+    await brain.dispose();
+  });
+
+  test('interrupt / stop 废掉在途转写：切模式之后不会冒出一句话', async () => {
+    const mic = fakeMic();
+    const asr = fakeAsr({ text: '来不及了', delayMs: 150 });
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: fakeAudio().create,
+      createMic: mic.create,
+      fetchImpl: brainFetch([{ chunks: [contentChunk('不该说出来。'), doneChunk()] }], asr),
+    });
+    await brain.start(false);
+    await brain.beginPushToTalk();
+    mic.feed(10);
+    brain.endPushToTalk();
+    await settle(10);
+    brain.interrupt();
+    await settle(250);
+    assert.equal(brain.transcript.length, 0, 'interrupt 之后转写不该再发起一轮');
+    assert.equal(asr.aborted, 1);
+
+    // 再来一次，这次用 stop（切模式走的就是这条路）。
+    await brain.beginPushToTalk();
+    mic.feed(10);
+    brain.endPushToTalk();
+    await settle(10);
+    await brain.stop();
+    await settle(250);
+    assert.equal(brain.transcript.length, 0);
+    assert.equal(asr.aborted, 2);
+    assert.equal(mic.stops >= 2, true, '每次都要放掉麦克风');
+    await brain.dispose();
+  });
+
+  test('识别失败走 error 事件，不抛给长按手势', async () => {
+    const mic = fakeMic();
+    const asr = fakeAsr({ status: 500 });
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: fakeAudio().create,
+      createMic: mic.create,
+      fetchImpl: brainFetch([], asr),
+    });
+    const events: PetEvent[] = [];
+    brain.on((e) => events.push(e));
+    await brain.start(false);
+    await assert.doesNotReject(() => brain.beginPushToTalk());
+    mic.feed(10);
+    brain.endPushToTalk();
+    await settle(60);
+    assert.ok(events.some((e) => e.type === 'error' && /语音识别/.test(e.message)));
+    assert.equal(brain.pushToTalkActive, false);
+    await brain.dispose();
+  });
+
+  test('麦克风打不开：error 事件带可操作提示，长按不 reject', async () => {
+    const brain = new ChatBrain({
+      desktop: fakeDesktop(),
+      createAudio: fakeAudio().create,
+      createMic: fakeMic({ failWith: new DOMException('denied', 'NotAllowedError') }).create,
+      fetchImpl: brainFetch([]),
+    });
+    const events: PetEvent[] = [];
+    brain.on((e) => events.push(e));
+    await brain.start(false);
+    await assert.doesNotReject(() => brain.beginPushToTalk());
+    assert.equal(brain.pushToTalkActive, false);
+    assert.ok(events.some((e) => e.type === 'error' && /授权/.test(e.message)));
+    brain.endPushToTalk(); // 松手不该抛
     await brain.dispose();
   });
 

@@ -13,8 +13,20 @@ import type { ActivityProbe, AwarenessIntent, Random, Settings, Spot } from './t
 
 /** 多久没互动算进入空闲。 */
 export const IDLE_AFTER_MS = 60_000;
-/** 多久没互动就打盹。 */
-export const NAP_AFTER_MS = 10 * 60_000;
+/**
+ * 打盹阈值的兜底值（分钟）。实际用 settings.sleepAfterMinutes，0 表示不自动睡。
+ *
+ * 为什么不再是固定常量：用户要求「5 分钟后自动进睡觉模式、可配置」。
+ * 这里保留一个默认值只是为了拿不到设置时有个合理行为。
+ */
+export const DEFAULT_SLEEP_AFTER_MINUTES = 5;
+
+/** 从设置算出打盹阈值（ms）。返回 null 表示不自动睡。 */
+export function napAfterMs(settings: Settings): number | null {
+  const minutes = settings.sleepAfterMinutes;
+  if (!Number.isFinite(minutes) || minutes <= 0) return null;
+  return minutes * 60_000;
+}
 /** 两次自主位移之间的最小间隔。 */
 export const MOVE_INTERVAL_MS = 4 * 60_000;
 /** 每次 tick 想挪的概率（配合 tick 间隔决定"偶尔"有多偶尔）。 */
@@ -60,9 +72,13 @@ export class IdleBehavior {
 
   /** 推进一步。返回这一步要做的事（可能为空）。 */
   tick(settings: Settings, now: number): IdleEffect[] {
-    // 自主行动关闭：彻底惰性。同时把计时基准推到现在，
-    // 这样用户中途打开开关是从零开始计空闲，而不是立刻触发一堆积压行为。
-    if (!settings.autonomy) {
+    // 两个开关管的是不同的事，所以要分开判：
+    //   autonomy          → 自己挪位置（会打扰人，默认关）
+    //   sleepAfterMinutes → 自动打盹（被动的，默认 5 分钟）
+    // 两个都关掉才彻底惰性。只关 autonomy 时她仍然会到点睡觉 —— 这正是用户要的
+    // 「安静的桌宠」，而不是「不许动也不许睡」。
+    const sleepEnabled = napAfterMs(settings) !== null;
+    if (!settings.autonomy && !sleepEnabled) {
       this.phaseValue = 'active';
       this.lastInteractionAt = now;
       return [];
@@ -82,7 +98,8 @@ export class IdleBehavior {
       // 不 return：刚进空闲就可以考虑挪一下。
     }
 
-    if (this.phaseValue === 'idle' && idleFor >= NAP_AFTER_MS) {
+    const napAfter = napAfterMs(settings);
+    if (this.phaseValue === 'idle' && napAfter !== null && idleFor >= napAfter) {
       this.phaseValue = 'napping';
       return [
         {
@@ -97,6 +114,8 @@ export class IdleBehavior {
 
     if (this.phaseValue !== 'idle') return [];
 
+    // 以下只有位移，所以到这里才检查 autonomy —— 打盹已经在上面处理完了。
+    if (!settings.autonomy) return [];
     // 位移：reduceMotion 一票否决。
     if (settings.reduceMotion) return [];
     if (now - this.lastMoveAt < MOVE_INTERVAL_MS) return [];

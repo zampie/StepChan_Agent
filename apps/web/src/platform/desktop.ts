@@ -6,6 +6,7 @@
 import {
   commands,
   credentialsSchema,
+  keyStatusSchema,
   defaultSettings,
   desktopEvents,
   frontmostAppSchema,
@@ -41,6 +42,12 @@ function browserFallback(): Desktop {
       const response = await fetch('/__dev/credentials');
       if (!response.ok) throw Error('浏览器调试模式需要 vite dev server 提供凭据。');
       return credentialsSchema.parse(await response.json());
+    },
+    async credentialsStatus() {
+      return null;
+    },
+    async setApiKey(): Promise<never> {
+      throw Error('浏览器调试模式不能写入 key，请改项目根目录的 .env。');
     },
     async setHitRegions() {},
     async setInteractive() {},
@@ -114,6 +121,13 @@ function tauriDesktop(): Desktop {
     available: true,
     async credentials() {
       return credentialsSchema.parse(await invoke(commands.credentials));
+    },
+    async credentialsStatus() {
+      const parsed = keyStatusSchema.safeParse(await invoke(commands.credentialsStatus));
+      return parsed.success ? parsed.data : null;
+    },
+    async setApiKey(key: string) {
+      return keyStatusSchema.parse(await invoke(commands.setApiKey, { key }));
     },
     async setHitRegions(regions: HitRegion[]) {
       await invoke(commands.setHitRegions, { regions });

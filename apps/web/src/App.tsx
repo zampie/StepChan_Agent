@@ -11,14 +11,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Awareness } from './awareness';
 import { createBrain, type PetBrain } from './brain/chat';
+import { TouchTalk } from './brain/touchTalk';
+import { setSpeechRate } from './voice/SpeechStream';
 import { RigRenderer } from './pet';
 import { desktop } from './platform/desktop';
-import hitRegions from './platform/hitRegions';
 import { reportDiagnostic } from './platform/diagnostics';
 import { Bubble } from './ui/Bubble';
 import { popupPetMenu } from './ui/PetMenu';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
-import type { ActionName, Expression, FxName, Spot } from '../../../shared/pet';
+import type { ActionName, Expression, FxName } from '../../../shared/pet';
 import type { PetEvent } from '../../../shared/brain';
 
 const RIG_URL = `${import.meta.env.BASE_URL}rig/rig.json`;
@@ -64,6 +65,10 @@ export function App() {
   const applyAppearance = useCallback((value: Settings) => {
     rigRef.current?.setSize(Math.round(BASE_SIZE * value.petScale));
     rigRef.current?.setReduceMotion(value.reduceMotion);
+    // 语速是模块级的：这一下会立刻作用到正在说话的实例，也会让之后新建的
+    // SpeechStream（RealtimeSession / ChatBrain 各自 new 的）自动带上倍率，
+    // 所以那两条链路都不用改。
+    setSpeechRate(value.speechRate);
   }, []);
 
   // ---- 渲染器 ----
@@ -73,6 +78,12 @@ export function App() {
     const rig = new RigRenderer({
       host,
       manifestUrl: RIG_URL,
+      // 命中区**随姿势变**。原来推一张按 idle 立姿量的静态表，于是 sleep 侧躺时
+      // 一个矩形都命中不到 → 整个窗口穿透，用户点不中她（实际报过的 bug）。
+      // 现在由渲染器在换姿势时把该姿势的实测矩形发过来。
+      onPoseRegions: (regions) => {
+        void desktop.setHitRegions(regions).catch(() => {});
+      },
       // 素材错误单独存：它是致命的（角色根本不出现），不能被凭据之类的
       // 临时错误覆盖掉，否则现场只剩"桌宠不显示"这一个没有指向性的症状。
       onError: (message) => {
@@ -146,11 +157,6 @@ export function App() {
           break;
         case 'tool_start':
           if (event.name === 'express') applyVisualIntent(rig, event.args);
-          // 她自己挪了位置，要同步给空闲行为，否则它可能再把她挪到原地。
-          if (event.name === 'move_to') {
-            const spot = (event.args as { spot?: Spot }).spot;
-            if (spot) awarenessRef.current?.notifyMoved(spot);
-          }
           break;
         case 'tool_end':
           if (!event.result.ok) rig?.setExpression('confused');
@@ -225,12 +231,6 @@ export function App() {
       awarenessRef.current = null;
       awareness.stop();
     };
-  }, []);
-
-  // ---- 命中区推给 Rust ----
-  // 穿透判定必须在 Rust 侧（见 hittest.rs 顶部），这里只负责把表喂过去。
-  useEffect(() => {
-    void desktop.setHitRegions(hitRegions);
   }, []);
 
   // Rust 的命中轮询只用来**记录**光标压在哪个部位；反应由单击触发。
@@ -381,6 +381,18 @@ export function App() {
   const DRAG_THRESHOLD = 4;
   /** 按住这么久算长按说话。短于它的按压算轻点。 */
   const LONG_PRESS_MS = 260;
+  /**
+   * 两次轻点间隔小于此值时，第二次不再触发表情反应。
+   *
+   * 双击是"打开输入框"的手势，但它必然由两次 pointerup 组成，所以不处理的话
+   * 一次双击会连换两次表情。刻意**不**用「延迟到确认不是双击再反应」的做法 ——
+   * 那会给单击加上 250ms 的迟滞，桌宠这种交互里能明显感觉到。
+   * 所以保留第一次的即时反馈，只吞掉第二次。
+   */
+  const TAP_DEDUPE_MS = 320;
+  const lastTapAt = useRef(0);
+  /** 被摸时让她开口的旁白生成器（带冷却，连点不刷屏）。 */
+  const touchTalk = useRef(new TouchTalk());
 
   /** 收尾：无论是松手、取消还是指针离开，都必须保证麦克风被放掉。 */
   const finishGesture = useCallback(() => {
@@ -389,36 +401,57 @@ export function App() {
     if (!g) return;
     window.clearTimeout(g.timer);
     rigRef.current?.setDragging(false);
+    // 必须无条件关掉：pointercancel / pointerleave 也走这里，
+    // 漏掉的话她会一直歪着头睁着眼、耳边挂着音符。
+    rigRef.current?.setListeningHold(false);
     if (g.talking) {
       // 长按结束 → 提交这一轮（Brain 内部会判断是不是太短而丢弃）。
       brainRef.current?.endPushToTalk();
       return;
     }
     if (!g.moved) {
-      // 轻点：换一个表情/动作/特效。渲染器自己保证不连续重复。
-      rigRef.current?.reactToTap(lastHitPart.current);
+      const now = Date.now();
+      const isSecondOfDouble = now - lastTapAt.current < TAP_DEDUPE_MS;
+      lastTapAt.current = now;
       awarenessRef.current?.notifyInteraction();
+      // 双击的第二下不再换表情（见 TAP_DEDUPE_MS）。
+      if (!isSecondOfDouble) {
+        // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
+        rigRef.current?.reactToTap(lastHitPart.current);
+        const line = touchTalk.current.narrate(lastHitPart.current, busyRef.current);
+        if (line) void brainRef.current?.sendText(line).catch(() => {});
+      }
     }
   }, []);
 
   const beginGesture = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      // 关掉持续聆听时，长按 = 按住说话；开着时长按没有特殊含义。
-      const pushToTalk = !settings.listening && settings.voiceEnabled;
+      // 长按 = 按住说话的条件，**问大脑而不是读设置**。
+      //
+      // 原来写的是 `!settings.listening`，但 listening 默认是 true，而聪明模式
+      // 根本没有「持续聆听」这回事（没有服务端 VAD）—— 于是长按在聪明模式下
+      // 永远不成立，功能对默认设置的用户直接不可达。
+      // 大脑的 listening getter 才是权威：realtime 跟随设置，chat 恒为 false。
+      const brain = brainRef.current;
+      const pushToTalk = settings.voiceEnabled && brain !== null && !brain.listening;
       const timer = pushToTalk
         ? window.setTimeout(() => {
             const g = gesture.current;
             if (!g || g.moved) return;
             g.talking = true;
-            void brainRef.current?.beginPushToTalk().catch((err: unknown) =>
-              setError(err instanceof Error ? err.message : '麦克风打不开。'),
-            );
+            // 按住期间给一个明确的持续状态：侧倾 + 睁大眼 + 耳边音符。
+            // 没有这个，用户按住之后完全不知道她有没有在听。
+            rigRef.current?.setListeningHold(true);
+            void brainRef.current?.beginPushToTalk().catch((err: unknown) => {
+              rigRef.current?.setListeningHold(false);
+              setError(err instanceof Error ? err.message : '麦克风打不开。');
+            });
           }, LONG_PRESS_MS)
         : 0;
       gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer };
     },
-    [settings.listening, settings.voiceEnabled],
+    [settings.voiceEnabled],
   );
 
   const moveGesture = useCallback((e: React.PointerEvent) => {
@@ -460,7 +493,11 @@ export function App() {
             onType: openComposer,
             onPatchSettings: applySettingsPatch,
             onOpenSettings: () => void desktop.openSettings().catch(() => {}),
-            onMoveAside: () => void desktop.moveToSpot('bottom_right').catch(() => {}),
+            onMoveAside: () => {
+              // 用户显式触发的位移才允许；模型没有这个工具（见 shared/brain.ts 头部）。
+              awarenessRef.current?.notifyMoved('bottom_right');
+              void desktop.moveToSpot('bottom_right').catch(() => {});
+            },
             onQuit: () => void desktop.quit().catch(() => {}),
           }).then((shown) => {
             // 原生菜单起不来时退回直接开输入框，不要让右键变成「什么都没发生」。

@@ -13,6 +13,8 @@ import type { Spot } from './pet';
 // plugin-opener 的 JS 接口，没必要为了两个一行的包装再加 Rust command。
 export const commands = {
   credentials: 'get_credentials',
+  credentialsStatus: 'credentials_status',
+  setApiKey: 'set_api_key',
   setHitRegions: 'set_hit_regions',
   setInteractive: 'set_interactive',
   moveToSpot: 'move_to_spot',
@@ -49,6 +51,23 @@ export const credentialsSchema = z
   })
   .strict();
 export type Credentials = z.infer<typeof credentialsSchema>;
+
+/**
+ * key 的配置状态。**刻意不含 key 本身** —— 界面只需要知道「配好了没有」
+ * 和「从哪儿来的」。把明文 key 送进 webview 再渲染到 DOM 是没必要的暴露面。
+ */
+export const keyStatusSchema = z
+  .object({
+    configured: z.boolean(),
+    /** 前 6 + 后 4 位。够用户确认「是我那把」，不够复用。 */
+    fingerprint: z.string(),
+    /** 实际生效的来源路径，排障第一眼看它。 */
+    source: z.string(),
+    /** 设置里写入时会用的路径（~/.stepchan/.env）。 */
+    userPath: z.string(),
+  })
+  .strict();
+export type KeyStatus = z.infer<typeof keyStatusSchema>;
 
 // 归一化到 0..1 的命中矩形，坐标系与素材画布一致（沿用 hitRegions.ts 的约定）。
 // 表情/动作切换时推给 Rust，Rust 侧轮询光标做命中测试 —— JS 的 mousemove 在
@@ -123,6 +142,20 @@ export const settingsSchema = z
   .object({
     voice: z.string().default('yuanqishaonv'),
     voiceEnabled: z.boolean().default(true),
+    /**
+     * 语速倍率。1.0 是模型原速。
+     *
+     * 两个模式的实现**完全不同**，这是实测结论不是设计选择：
+     * - chat 模式：`/v1/audio/speech` 支持 `speed` 参数且真的生效
+     *   （实测 3.84s → speed=1.5 得 2.88s）。直接透传。
+     * - realtime 模式：服务端**没有**任何语速控制。实测 `speed` /
+     *   `speech_rate` / `output_audio_speed` 全被静默忽略，在 instructions 里
+     *   要求"语速加快"也完全无效（时长一字不差，甚至更长）。所以只能在播放侧
+     *   做保持音高的时间伸缩。
+     * 默认 1.15：默认档就比原速快一点（用户反馈原速"显得憨憨的"），
+     * 但不到会让时间伸缩出现可听瑕疵的程度。
+     */
+    speechRate: z.number().min(0.8).max(1.8).default(1.15),
     /** 持续聆听。关掉之后只能长按桌宠说话（按住说、松手发）。 */
     listening: z.boolean().default(true),
     /**
@@ -142,6 +175,15 @@ export const settingsSchema = z
     appAwareness: z.boolean().default(false),
     clipboardAwareness: z.boolean().default(false),
     autonomy: z.boolean().default(false),
+    /**
+     * 多久没互动就自己去睡（分钟）。0 = 不自动睡。
+     *
+     * 刻意**不**受 autonomy 开关约束：autonomy 管的是「自己挪位置、主动搭话」
+     * 这类会打扰人的行为，而打盹是被动的 —— 她只是换个姿势待着，任何操作都会
+     * 把她叫醒。把两者绑在一起会让「想要安静的桌宠」和「不想被挪窗口」变成
+     * 一个开关，而用户要的是前者。
+     */
+    sleepAfterMinutes: z.number().min(0).max(120).default(5),
     petScale: z.number().min(0.5).max(2).default(1),
     reduceMotion: z.boolean().default(false),
     hotkey: z.string().default('Alt+Space'),
@@ -161,6 +203,10 @@ export type DragDropPayload =
 export type Desktop = {
   readonly available: boolean;
   credentials(): Promise<Credentials>;
+  /** 查 key 配置状态（不含 key 本身）。 */
+  credentialsStatus(): Promise<KeyStatus | null>;
+  /** 写入 key 到用户级配置并立即生效，不需要重启。 */
+  setApiKey(key: string): Promise<KeyStatus>;
   setHitRegions(regions: HitRegion[]): Promise<void>;
   /**
    * 强制窗口进入/退出可交互态。`null` = 交还给 Rust 的命中轮询。

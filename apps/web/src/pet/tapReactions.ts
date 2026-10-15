@@ -91,3 +91,19 @@ export function tapTargetOf(part?: string | null): TapTarget {
 
 /** 单击后临时动作的保持时长（ms），之后自动回 idle。 */
 export const tapActionHoldMs = 1400;
+
+/**
+ * 单击后临时**表情**的保持时长（ms），之后自动回 neutral。
+ *
+ * 比动作的 1400 ms 长一倍半，因为两者要读的东西不一样：
+ * 动作是整身姿势，一眼就看完；表情在 220 px 下只有十几像素的五官，
+ * 实测（人眼看 _qa_faces.png 的特写）得盯一会儿才分得清 happy 和 proud，
+ * 所以给 150 ms 淡入 + 约 3 s 的稳定观察窗。
+ *
+ * 为什么不更长：挂着一个「被摸头摸出来的害羞」直到下次互动，会和她说话时的真实情绪打架。
+ * 为什么不更短：短于 2 s 的话用户还没把视线移到脸上就塌回去了，看起来像没反应。
+ *
+ * **这个倒计时只管单击这条路。** 模型通过 express 工具设的表情走 setExpression()，
+ * 不会过期 —— 那是她当前真实的情绪状态。两条路的区别见 RigRenderer.setExpression 的注释。
+ */
+export const tapExpressionHoldMs = 3500;

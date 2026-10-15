@@ -1,6 +1,15 @@
 // 大脑契约：人设、工具、以及大脑发给 UI/渲染器的事件。
 //
 // 「房间」已删除。工具面向真实桌面，不再操作虚构的台灯盆栽。
+//
+// **move_to 是被程序化门控的，不是普通工具。**
+// 模型曾经会在没人要求时自己挪位置，用户看到的就是桌宠在屏幕上乱跳。
+// 但完全删掉又会让「让开」「挡住了」失效，所以改成：工具保留，
+// **执行器在本回合用户没有真的提出挪动要求时一律拒绝**（见 brain/tools.ts 的
+// movementRequested）。这是代码判定，不是在 prompt 里求她别乱动 ——
+// 后者就是她乱跳的原因。
+// 另有一条「系统调用」路径不经过模型：右键菜单的「让一让」直接调
+// desktop.moveToSpot，将来「走到某个文件那里再打开」之类的编排也走那条路。
 // 涉及隐私的工具（看屏幕、读剪贴板、看前台应用）在设置里默认关闭，
 // 关闭时工具会返回明确的拒绝消息，而不是静默失败 —— 她需要知道自己被限制了，
 // 这样才能说「我现在看不到你的屏幕，你要先在菜单里打开」。
@@ -116,24 +125,27 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'open_url',
-      description: '准备一个 HTTPS 链接卡片。你不会打开或读取网页，必须由用户点击。',
+      name: 'move_to',
+      description:
+        '把自己挪到屏幕的某个位置。**只有在用户这一轮明确要求你让开/挪位置时才可以调用**；' +
+        '你自己觉得该换个地方待着时不要调用，那会让桌宠在屏幕上乱跳。' +
+        '用户没要求时调用会被直接拒绝。',
       parameters: {
         type: 'object',
-        properties: { url: { type: 'string' } },
-        required: ['url'],
+        properties: { spot: { type: 'string', enum: [...spots] } },
+        required: ['spot'],
       },
     },
   },
   {
     type: 'function',
     function: {
-      name: 'move_to',
-      description: '把自己挪到屏幕的某个位置。用户说「让开」「去角落」或你想换个地方待着时调用。',
+      name: 'open_url',
+      description: '准备一个 HTTPS 链接卡片。你不会打开或读取网页，必须由用户点击。',
       parameters: {
         type: 'object',
-        properties: { spot: { type: 'string', enum: [...spots] } },
-        required: ['spot'],
+        properties: { url: { type: 'string' } },
+        required: ['url'],
       },
     },
   },

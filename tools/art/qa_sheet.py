@@ -111,10 +111,10 @@ def place_logo(canvas: Image.Image, logo: Image.Image, p: dict) -> Image.Image:
     return canvas
 
 
-def with_logo(manifest: dict, logo_manifest: dict, body: Image.Image) -> Image.Image:
+def with_logo(logo: Image.Image, body: Image.Image, placements: dict) -> Image.Image:
+    """把一帧的全部 placement 贴到这一帧的身体图上。placements 是 logo.json 里该动作的那一格。"""
     out = body.copy()
-    logo = Image.open(ASSETS / logo_manifest["asset"]["file"]).convert("RGBA")
-    for p in logo_manifest["placements"].values():
+    for p in placements.values():
         place_logo(out, logo, p)
     return out
 
@@ -223,19 +223,89 @@ def main() -> int:
     print(f"wrote {out2} {close.size}")
 
     logo_sheet()
+    hit_sheet()
     return 0
+
+
+# 命中区的配色。顺序即优先级（Rust 取第一个命中的），所以画的时候也按这个顺序叠。
+HIT_COLORS = {
+    "badge": (226, 40, 40, 255),
+    "cheek": (255, 150, 40, 255),
+    "hand": (40, 170, 70, 255),
+    "head": (60, 110, 230, 255),
+    "skirt": (170, 70, 210, 255),
+    "body": (90, 95, 110, 255),
+}
+
+
+def hit_sheet() -> None:
+    """逐姿势命中区的 QA 图。
+
+    每个姿势画一张：角色 + 该姿势的全部命中矩形（按部位配色，标题里有图例）。
+    要人眼复核的就一件事 —— **矩形有没有压在对应的部位上**，以及灰色的整身兜底框
+    有没有把角色整个框住。sleep 那一帧原来一个矩形都命中不到，就是这张图要防的事。
+    """
+    manifest = json.loads((ASSETS / "rig.json").read_text())
+    path = ASSETS / "hitregions.json"
+    if not path.exists():
+        print("!! 没有 hitregions.json，跳过 _qa_hit.png（先跑 tools/art/regions.py）")
+        return
+    hm = json.loads(path.read_text())
+    f = font(11)
+
+    tiles: list[tuple[str, Image.Image]] = []
+    for name, a in manifest["actions"].items():
+        body = load(manifest, a["file"])
+        canvas = Image.new("RGBA", body.size, (255, 255, 255, 255))
+        canvas.alpha_composite(body)
+        d = ImageDraw.Draw(canvas)
+        regions = hm["poses"][name]
+        # 兜底框先画（最底层的语义），再画细分部位，这样小矩形不会被灰框盖住。
+        for r in sorted(regions, key=lambda r: r["part"] != "body"):
+            c = HIT_COLORS.get(r["part"], (0, 0, 0, 255))
+            box = (
+                r["x0"] * body.width,
+                r["y0"] * body.height,
+                r["x1"] * body.width,
+                r["y1"] * body.height,
+            )
+            d.rectangle(box, outline=c, width=3)
+            d.text((box[0] + 3, box[1] + 1), r["part"], fill=c, font=f)
+        tiles.append((f"{name} ({len(regions)} rects)", canvas))
+
+    legend = "  ".join(HIT_COLORS)
+    width = PAD + len(tiles) * (TILE + PAD)
+    parts = [
+        strip(
+            {},
+            tiles,
+            LIGHT,
+            f"per-pose hit regions @{TILE} — order = priority; grey 'body' is the never-miss fallback. parts: {legend}",
+            tile=TILE,
+            min_width=width,
+        ),
+        # 320 px 一档再画一遍：220 px 下 badge 那种小矩形几乎看不清边。
+        strip({}, tiles, LIGHT, "same, larger", tile=320, min_width=width),
+    ]
+    sheet = stack(parts)
+    out = ASSETS / "_qa_hit.png"
+    sheet.save(out)
+    print(f"wrote {out} {sheet.size}")
 
 
 def logo_sheet() -> None:
     """StepFun logo 图层的专用 QA 图。
 
-    四段，每一段回答一个具体问题：
+    五段，每一段回答一个具体问题：
     1. 栅格化产物本身对不对 —— 白底 / 深底 / 棋盘，以及和 qlmanage 渲染的同一份 SVG 叠合
        （红 = 只有我的，绿 = 只有 SVG 渲染器的；只应该剩一圈 1 px 的抗锯齿描边）。
-    2. 220 px 全身，覆盖前 / 覆盖后，浅底与深底 —— 这是真实显示尺寸下的观感。
-    3. 徽章特写 6× 放大，覆盖前 / 覆盖后 —— 看旧徽章有没有从圆盘边上露出来。
-    4. 覆盖后与「圆盘掩膜」的叠合：把 logo 画成纯红，旧徽章的深色像素还露在红圈外面
-       就会显成黑边。这一段是「盖干净了」的像素级证据，不靠肉眼估。
+    2. **每个动作 + 每个整脸 sprite 表情**在 220 px 下覆盖后的样子，浅底与深底各一行。
+       这是用户真正看得到的东西，逐格人眼复核。标题里的 `-chest` 表示那一帧的胸前徽章
+       量不到（被遮住），运行期只画发饰那一枚。
+    3. 覆盖前 / 覆盖后对照（仍是 220 px），用来确认「原来的假方块」真的被换掉了。
+    4. 徽章特写，逐帧逐位置，覆盖后 —— 看旧徽章有没有从圆盘边上露出来。
+    5. 覆盖证明：把 logo 画成纯红，旧徽章的深色像素还露在红圈外面就会显成黑边。
+       这一段是「盖干净了」的像素级证据，不靠肉眼估。
     """
     manifest = json.loads((ASSETS / "rig.json").read_text())
     lm_path = ASSETS / "logo.json"
@@ -244,8 +314,24 @@ def logo_sheet() -> None:
         return
     lm = json.loads(lm_path.read_text())
     logo = Image.open(ASSETS / lm["asset"]["file"]).convert("RGBA")
+    placements = lm["placements"]
+
+    # ---- 逐帧：(标签, 身体图, 该帧的 placements) ----
+    # 动作按 rig.json 的顺序；整脸 sprite 表情沿用 idle 帧的位置（logo.py 已实测验证一致，
+    # 见 measured.spriteExpressions），所以这里也用 idle 的 placements —— 和运行期一致。
+    frames: list[tuple[str, Image.Image, dict]] = []
+    for name, a in manifest["actions"].items():
+        p = placements.get(name, {})
+        missing = [s for s in ("hair", "chest") if s not in p]
+        label = name + "".join(f" -{s}" for s in missing)
+        frames.append((label, load(manifest, a["file"]), p))
+    for name, e in manifest["expressions"].items():
+        if e.get("mode") != "sprite":
+            continue
+        frames.append((f"{name} [sprite]", load(manifest, e["sprite"]["file"]), placements["idle"]))
+
+    after = [(lbl, with_logo(logo, body, p)) for lbl, body, p in frames]
     base = load(manifest, manifest["base"]["file"])
-    after = with_logo(manifest, lm, base)
 
     # ---- 1. 产物自身 ----
     icon = parse_icon((ASSETS / lm["source"]["svg"]).read_text())
@@ -273,24 +359,28 @@ def logo_sheet() -> None:
         (f"vs SVG: IoU {fid.get('iou', '?')}", overlay),
     ]
 
-    # ---- 2. 220 px 全身 ----
-    full_light = [("before (fake badge)", base), ("after (StepFun logo)", after)]
+    # ---- 3. 覆盖前后对照（idle 画幅）----
+    before_after = [
+        ("idle before (fake badge)", base),
+        ("idle after (StepFun logo)", with_logo(logo, base, placements["idle"])),
+    ]
 
-    # ---- 3/4. 特写 ----
+    # ---- 4/5. 特写与覆盖证明，逐帧逐位置 ----
     closeups: list[tuple[str, Image.Image]] = []
     proof: list[tuple[str, Image.Image]] = []
     flat = Image.new("RGBA", logo.size, (226, 40, 40, 255))
     flat.putalpha(logo.getchannel("A"))
-    for slot, p in lm["placements"].items():
-        r = int(p["size"])
-        box = (int(p["cx"] - r), int(p["cy"] - r), int(p["cx"] + r), int(p["cy"] + r))
-        closeups.append((f"{slot} before", base.crop(box)))
-        closeups.append((f"{slot} after d={p['size']} cover={p['coverRadius']}", after.crop(box)))
-        masked = place_logo(base.copy(), flat, p)
-        proof.append((f"{slot} coverage", masked.crop(box)))
+    for (lbl, body, p), (_, done) in zip(frames, after):
+        for slot, pl in p.items():
+            r = int(pl["size"])
+            box = (int(pl["cx"] - r), int(pl["cy"] - r), int(pl["cx"] + r), int(pl["cy"] + r))
+            closeups.append((f"{lbl.split(' ')[0]}/{slot} d={pl['size']} cov={pl['coverRadius']}", done.crop(box)))
+            proof.append((f"{lbl.split(' ')[0]}/{slot}", place_logo(body.copy(), flat, pl).crop(box)))
 
     deep = fid.get("deepMismatchPixels", "?")
-    width = PAD + 4 * (200 + PAD)
+    width = PAD + max(len(after), len(closeups)) * (TILE + PAD)
+    n_frames = len(frames)
+    n_full = sum(1 for _, _, p in frames if len(p) == 2)
     parts = [
         strip(
             {},
@@ -300,16 +390,25 @@ def logo_sheet() -> None:
             tile=200,
             min_width=width,
         ),
-        strip({}, full_light, LIGHT, "logo overlay / light @220", tile=TILE, min_width=width),
-        strip({}, full_light, DARK, "logo overlay / dark @220", tile=TILE, min_width=width),
-        strip({}, closeups, LIGHT, "badge close-up / light (6x)", tile=200, min_width=width),
-        strip({}, closeups, DARK, "badge close-up / dark (6x)", tile=200, min_width=width),
+        strip(
+            {},
+            after,
+            LIGHT,
+            f"per-frame logo coverage / light @220 — {n_frames} frames, {n_full} with both badges "
+            "(label suffix -chest = that badge is occluded in this pose, no logo drawn there)",
+            tile=TILE,
+            min_width=width,
+        ),
+        strip({}, after, DARK, "per-frame logo coverage / dark @220", tile=TILE, min_width=width),
+        strip({}, before_after, LIGHT, "before / after (idle frame) @220", tile=TILE, min_width=width),
+        strip({}, closeups, LIGHT, "badge close-up after coverage / light", tile=TILE, min_width=width),
+        strip({}, closeups, DARK, "badge close-up after coverage / dark", tile=TILE, min_width=width),
         strip(
             {},
             proof,
             LIGHT,
             "coverage proof — logo painted flat red; any dark outside the red disc is the old badge leaking",
-            tile=200,
+            tile=TILE,
             min_width=width,
         ),
     ]

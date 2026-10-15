@@ -86,6 +86,10 @@ const PERCEPTION_BASE = `# 你能感知到什么
 function toolGuide(): string {
   return `# 工具
 - express：改你自己的表情/动作/小特效。想让用户看到情绪就调它，不要用文字描述表情。可以和说话同时发生。
+  **这个要多用，而且要跟着当下的情境变。** 用户看得见你，脸是你最直接的表达方式。
+  几个具体时机：听懂了 happy、没听懂 confused、被夸 shy、讲到得意的事 proud、
+  看到意外的东西 surprised、夜深了或用户很久没动 sleepy、说到开心的事 excited。
+  **不要开头调一次然后一直挂着同一张脸** —— 情绪变了就再调一次。
   表情：${expressions.join('、')}
   动作：${actions.join('、')}
   特效：${fxNames.join('、')}
@@ -94,8 +98,8 @@ function toolGuide(): string {
 - get_time：查真实时间。
 - set_timer：设一个真的 macOS 通知倒计时。只在用户要求时调，调完告诉他们你设了多久。
 - read_clipboard：读一次剪贴板文字。
+- move_to：把自己挪到屏幕某处。**只有用户这一轮明确让你让开/挪位置时才能调**；你自己想换地方待着不要调，那会让桌宠乱跳，而且会被直接拒绝。
 - open_url：把一个 https 链接做成卡片。你不会打开它也读不到内容，必须由用户点。说明清楚这一点。
-- move_to：把自己挪到屏幕的某个位置。用户说「让开」「挡住了」「去角落」时调。
   位置：${spots.join('、')}
 
 一轮最多用 4 个工具。工具不是用来刷存在感的，没必要就别调。`;
@@ -159,6 +163,20 @@ export function buildInstructions(context: PersonaContext): string {
  * 刻意保守：只匹配指向性非常明确的说法。宁可漏判（她就正常回答），
  * 也不要误判（强制调工具会让一句闲聊变成一次截屏）。
  */
+/**
+ * 这一句话有没有真的在要求挪位置。
+ *
+ * move_to 的程序化闸门用它（见 brain/tools.ts 的 movementRequested）。
+ * 刻意和 textNeedsTool 分开导出：那个是「该补一刀提醒」，这个是「准不准动」，
+ * 两者的误判代价不同 —— 前者多提醒一次无害，后者放宽了就会乱跳。
+ */
+export function textRequestsMove(text: string): boolean {
+  const t = text.trim();
+  if (/(让开|挪开|挡住|挡着|别挡|躲开|让一让)/.test(t)) return true;
+  if (/(挪|搬|移|去|到).{0,6}(左下|右下|左上|右上|角落|中间|中央|边上|旁边)/.test(t)) return true;
+  return false;
+}
+
 export function textNeedsTool(text: string): import('../../../../shared/brain').ToolName | null {
   const t = text.trim();
   if (/(看一?下|看看|瞄一?眼|瞅一?眼)(我的)?(屏幕|桌面|这个画面)/.test(t)) return 'glance_screen';
@@ -168,9 +186,6 @@ export function textNeedsTool(text: string): import('../../../../shared/brain').
   if (/(现在)?(几点|什么时间)/.test(t)) return 'get_time';
   if (/(电量|电池)(还有)?(多少)?/.test(t) && /[多少还剩吗？?]/.test(t)) return 'get_system_status';
   if (/(提醒我|定个?闹钟|设个?闹钟|倒计时)/.test(t)) return 'set_timer';
-  if (/(让开|挪开|挡住|挡着|别挡|躲开)/.test(t)) return 'move_to';
-  if (/(挪|搬|移)到.{0,4}(左下|右下|左上|右上|角落|中间|中央)/.test(t)) return 'move_to';
-  if (/去(左下|右下|左上|右上|角落|中间|中央)/.test(t)) return 'move_to';
   return null;
 }
 

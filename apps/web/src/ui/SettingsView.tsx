@@ -97,6 +97,26 @@ export function SettingsView() {
         </label>
         {/* 模型首次出音后音色不可改，所以换音色要重建会话 —— 用户需要知道会断一下。 */}
         <p className="hint">换音色会重新建立一次语音连接，正在说的话会中断。</p>
+        <label className="row">
+          <span>语速</span>
+          <input
+            type="range"
+            min={0.8}
+            max={1.8}
+            step={0.05}
+            value={settings.speechRate}
+            onChange={(e) => void update({ speechRate: Number(e.target.value) })}
+          />
+          <span className="value">{settings.speechRate.toFixed(2)}×</span>
+        </label>
+        {/* 两个模式的实现完全不同，而且差异是用户能听出来的，所以这里讲清楚。 */}
+        <p className="hint">
+          默认 1.15 倍 —— 模型原速听着有点慢。两个模式调速的方式不一样：
+          <strong>聪明优先</strong>是让服务端直接按这个倍率合成（下一句生效）；
+          <strong>反应优先</strong>的服务端不支持调速，是在播放时做保持音高的变速处理，
+          立刻生效。1.4 倍以内基本听不出来，再往上（尤其 1.6+）可能听到轻微的沙沙感
+          或接缝。想完全不处理就把它拖回 1.00 倍。
+        </p>
       </section>
 
       <section>
@@ -168,6 +188,26 @@ export function SettingsView() {
             </select>
           </label>
         )}
+      </section>
+
+      <section>
+        <h2>睡觉</h2>
+        <label className="row">
+          <span>多久不理她就去睡</span>
+          <input
+            type="number"
+            min={0}
+            max={120}
+            step={1}
+            value={settings.sleepAfterMinutes}
+            onChange={(e) => void update({ sleepAfterMinutes: Number(e.target.value) })}
+          />
+          <span className="value">分钟</span>
+        </label>
+        <p className="hint">
+          填 0 就不会自动睡。任何操作（说话、点她、按热键）都会把她叫醒。
+          这一项**不受**「允许她自己在桌面上走动」约束 —— 打盹是被动的，不会打扰你。
+        </p>
       </section>
 
       <section>

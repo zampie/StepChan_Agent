@@ -2,6 +2,7 @@
 // 清单由 tools/art 生成，运行时只读。校验用 shared/pet.ts 的 schema —— 渲染器不自己定义结构。
 import { actions, rigManifestSchema, type ActionName, type RigManifest } from '../../../../shared/pet';
 import { logoUrlFor, parseLogoManifest, type LoadedLogo } from './logoManifest';
+import { parsePoseRegions, poseRegionsUrlFor, type LoadedPoseRegions } from './poseRegions';
 
 export interface LoadedRig {
   manifest: RigManifest;
@@ -14,6 +15,12 @@ export interface LoadedRig {
    */
   logo: LoadedLogo | null;
   logoError: string | null;
+  /**
+   * 逐姿势命中区（同样是 sidecar，见 poseRegions.ts 顶部）。
+   * 取不到时为 null —— 渲染器会退回整身兜底框，部位细分失效但**不会点不中**。
+   */
+  regions: LoadedPoseRegions | null;
+  regionsError: string | null;
 }
 
 /**
@@ -47,8 +54,9 @@ export async function loadRig(manifestUrl: string, fetchImpl: typeof fetch = fet
     const first = parsed.error.issues[0];
     throw new Error(`rig.json 不符合契约：${first.path.join('.')} ${first.message}`);
   }
-  // logo 是 sidecar，**不**让它的失败挡住整个角色：没有 logo 层角色还能用，
-  // 而 rig.json 挂了什么都没有。所以这里吞异常但把原因留下。
+  // 两份 sidecar 都**不**让它们的失败挡住整个角色：没有 logo 层角色还能用、
+  // 没有命中区清单还有整身兜底框，而 rig.json 挂了什么都没有。
+  // 所以这里吞异常但把原因留下。
   let logo: LoadedLogo | null = null;
   let logoError: string | null = null;
   try {
@@ -58,7 +66,23 @@ export async function loadRig(manifestUrl: string, fetchImpl: typeof fetch = fet
   } catch (e) {
     logoError = `logo.json 不可用（${(e as Error)?.message ?? String(e)}）：身上会留着 master 自带的假徽章`;
   }
-  return { manifest: parsed.data, baseUrl: resolveBaseUrl(manifestUrl), logo, logoError };
+  let regions: LoadedPoseRegions | null = null;
+  let regionsError: string | null = null;
+  try {
+    const rres = await fetchImpl(poseRegionsUrlFor(manifestUrl));
+    if (!rres.ok) throw new Error(`HTTP ${rres.status}`);
+    regions = parsePoseRegions(await rres.json());
+  } catch (e) {
+    regionsError = `hitregions.json 不可用（${(e as Error)?.message ?? String(e)}）：命中区退回整身兜底框，摸头/捏脸的部位细分失效`;
+  }
+  return {
+    manifest: parsed.data,
+    baseUrl: resolveBaseUrl(manifestUrl),
+    logo,
+    logoError,
+    regions,
+    regionsError,
+  };
 }
 
 /** 清单里声明为降级的条目，UI 可以据此显示「这个表情没有分层」。 */

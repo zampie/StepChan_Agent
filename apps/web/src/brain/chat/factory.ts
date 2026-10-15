@@ -25,12 +25,13 @@ export type PetBrain = {
   disableMic(): void;
   /**
    * 「按住说话」。持续聆听关掉之后，长按桌宠是唯一的语音入口。
-   * chat 模式这一版没有语音输入，实现成安全的空操作（见 ChatBrain）。
+   * 两种模式都真的能用：realtime 走服务端 ASR，chat 走 /v1/audio/asr/sse
+   * （见 chat/listen.ts）。两边都不 reject —— 手势层不该为模式分支写 try/catch。
    */
   beginPushToTalk(): Promise<void>;
   endPushToTalk(): void;
   readonly pushToTalkActive: boolean;
-  /** 持续聆听开关的当前值。UI 用它决定要不要显示长按提示。 */
+  /** 持续聆听开关的当前值。UI 用它决定要不要显示长按提示。chat 模式恒为 false。 */
   readonly listening: boolean;
   /** 语音能不能自动打断她。手动 interrupt() 不受它影响。 */
   readonly voiceInterruptible: boolean;

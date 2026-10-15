@@ -2,29 +2,35 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BlinkScheduler,
+  HoldTimer,
   ShuffleBag,
   Spring,
   VisemeTracker,
   audioVisemeLadder,
   breathe,
-  clawFeel,
-  clawPose,
   crossfadeMs,
   easeInOut,
+  fullBodyFallback,
   fxPose,
+  listenFeel,
+  listenPose,
   logoUrlFor,
   minHoldMs,
+  parsePoseRegions,
+  poseRegionsUrlFor,
   resolveBaseUrl,
-  sagTarget,
   silenceFloor,
   squash,
   sway,
-  swingTarget,
+  tapActionHoldMs,
+  tapExpressionHoldMs,
   tapPools,
   tapTargetOf,
   tapTargets,
+  type PoseRegion,
   type TapReaction,
 } from '../apps/web/src/pet';
+import type { HitRegion } from '../shared/desktop';
 import {
   actions,
   expressions,
@@ -266,85 +272,144 @@ test('logoUrlFor 把 rig.json 换成同目录的 logo.json', () => {
   assert.equal(logoUrlFor('rig.json'), 'logo.json');
 });
 
+test('poseRegionsUrlFor 把 rig.json 换成同目录的 hitregions.json', () => {
+  assert.equal(poseRegionsUrlFor('/rig/rig.json'), '/rig/hitregions.json');
+  assert.equal(poseRegionsUrlFor('rig.json'), 'hitregions.json');
+});
+
 // ---------------------------------------------------------------------------
-// 抓娃娃机姿态
+// 按住聆听的持续状态
 //
-// Pixi 渲染器在这个环境里跑不起来（没有 GUI），所以**手感没有被验证过**。
-// 这里能验证的是手感背后的数学：站地时必须完全中性、体积守恒、各项有界、
-// 支点确实会从脚底搬到头顶。这些性质错了，手感一定错；它们对了，手感仍然要人眼看。
+// Pixi 在这个环境里跑不起来（没有 GUI），所以**手感没有被验证过**。
+// 这里验证的是它背后的数学：没按住时必须完全中性、按住时标记必须「一直看得见」
+// （这正是「持续状态」与「一次性特效」的分界）、各项有界、reduceMotion 下是静态的。
 // ---------------------------------------------------------------------------
 
-const REST = { lift: 0, swing: 0, lag: 0, sag: 0, rebound: 0 };
-
-test('没被提起时抓娃娃机姿态完全中性（支点在脚底、无位移无切变无缩放）', () => {
-  const p = clawPose(REST);
-  assert.equal(p.pivotY, 1, '站着的支点必须是锚点（脚底）');
-  assert.equal(p.riseFrac, 0);
-  assert.equal(p.rotation, 0);
-  assert.equal(p.skewX, 0);
-  assert.deepEqual({ x: p.scaleX, y: p.scaleY }, { x: 1, y: 1 });
-});
-
-test('lift 把支点从脚底搬到头顶并抬升身体 —— 这是悬挂感的来源', () => {
-  const up = clawPose({ ...REST, lift: 1 });
-  assert.ok(Math.abs(up.pivotY - clawFeel.liftPivotY) < 1e-9, `支点 ${up.pivotY}`);
-  assert.ok(up.pivotY < 0.2, `支点 ${up.pivotY} 不在画幅上部，旋转会读作「歪了」而不是「吊着」`);
-  assert.ok(up.riseFrac < 0, '被提起时应该整体上移');
-  // 中间状态必须是插值，不能是开关 —— 否则抓起/放下的瞬间会跳一帧。
-  const mid = clawPose({ ...REST, lift: 0.5 });
-  assert.ok(mid.pivotY > up.pivotY && mid.pivotY < 1, `支点没有插值：${mid.pivotY}`);
-});
-
-test('摆角、切变、下垂都乘在 lift 上 —— 放手后自动收回，不需要退出动画', () => {
-  const input = { lift: 0, swing: 0.4, lag: 0, sag: clawFeel.sagMax, rebound: 0 };
-  const grounded = clawPose(input);
-  assert.equal(grounded.rotation, 0, 'lift=0 时不该有悬挂摆角');
-  assert.equal(grounded.skewX, 0, 'lift=0 时不该有切变');
-  assert.deepEqual({ x: grounded.scaleX, y: grounded.scaleY }, { x: 1, y: 1 }, 'lift=0 时不该有下垂');
-  const lifted = clawPose({ ...input, lift: 1 });
-  assert.ok(Math.abs(lifted.rotation) > 0.3);
-  assert.ok(lifted.scaleY > 1 && lifted.scaleX < 1, '下垂必须是竖向拉长、横向收窄');
-});
-
-test('下半身滞后产生切变，切变有界且在同步时归零', () => {
-  const synced = clawPose({ ...REST, lift: 1, swing: 0.3, lag: 0.3 });
-  assert.equal(synced.skewX, 0, '上下身同步时不该有切变');
-  const trailing = clawPose({ ...REST, lift: 1, swing: 0.4, lag: 0 });
-  assert.ok(trailing.skewX > 0, '上身先动时下身应该拖在后面');
-  const extreme = clawPose({ ...REST, lift: 1, swing: 99, lag: -99 });
-  assert.equal(extreme.skewX, clawFeel.lagMax, '切变必须被夹住，否则身体会被撕开');
-});
-
-test('落地回弹是先压扁后拉长（squash 输入为负＝压扁）', () => {
-  const land = clawPose({ ...REST, rebound: -clawFeel.landBounce });
-  assert.ok(land.scaleY < 1 && land.scaleX > 1, '落地第一下必须是压扁');
-  assert.ok(clawFeel.landVelocity > 0, '初速度必须为正，才能从压扁冲过 0 变成拉长');
-});
-
-test('抓娃娃机的缩放永远体积守恒（squash 的性质，不许被绕过）', () => {
-  for (const lift of [0, 0.3, 1]) {
-    for (const sag of [0, 0.05, 0.085]) {
-      for (const rebound of [-0.26, 0, 0.2]) {
-        const p = clawPose({ ...REST, lift, sag, rebound });
-        assert.ok(
-          Math.abs(p.scaleX - 1 + (p.scaleY - 1)) < 1e-12,
-          `lift=${lift} sag=${sag} rebound=${rebound} 不是体积守恒：${p.scaleX} × ${p.scaleY}`,
-        );
-      }
-    }
+test('没按住时聆听姿态完全中性（不转、标记不显示）', () => {
+  for (const t of [0, 250, 1700, 9999]) {
+    const p = listenPose(t, 0);
+    assert.deepEqual(p, { rotation: 0, markScale: 0, markAlpha: 0 }, `t=${t} 不该有任何表现`);
   }
 });
 
-test('摆角与下垂的速度映射被夹住，且方向与拖动相反', () => {
-  assert.equal(swingTarget(0), 0);
-  assert.ok(swingTarget(600) < 0, '往右拖时身体应该落在手的左后方');
-  assert.equal(swingTarget(1e9), -clawFeel.swingMax);
-  assert.equal(swingTarget(-1e9), clawFeel.swingMax);
-  // 提着不动也该垂着 —— 只有速度驱动的话静止悬挂就完全没有重量感。
-  assert.ok(sagTarget(0) > 0, '静止悬挂也要有底量下垂');
-  assert.ok(sagTarget(5000) > sagTarget(0), '拽得越快垂得越长');
-  assert.ok(sagTarget(1e9) <= clawFeel.sagMax + 1e-12, '下垂必须被夹住');
+test('按住期间标记始终可见 —— 脉动有下限，不会像 FX 那样淡出到 0', () => {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let t = 0; t < 12000; t += 17) {
+    const p = listenPose(t, 1);
+    min = Math.min(min, p.markAlpha);
+    max = Math.max(max, p.markAlpha);
+    assert.ok(p.markScale > 0, '标记不该缩到 0');
+  }
+  assert.ok(min >= listenFeel.markAlphaMin - 1e-9, `标记最低透明度 ${min}，掉到下限以下了`);
+  assert.ok(min > 0.3, '下限太低，按住时会看起来像在闪');
+  assert.ok(max <= 1 + 1e-9);
+  // 必须真的在脉动，否则「呼吸式」只是说法。
+  assert.ok(max - min > 0.1, `透明度只变化了 ${max - min}，看不出脉动`);
+  // FX 的生命周期是会结束的，聆听状态不会 —— 这条断言把两者的区别钉死。
+  assert.equal(fxPose(2000, 1400).done, true);
 });
+
+test('聆听侧倾方向恒定、幅度有界（是姿势，不是左右摇）', () => {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let t = 0; t < 12000; t += 17) {
+    const r = listenPose(t, 1).rotation;
+    min = Math.min(min, r);
+    max = Math.max(max, r);
+  }
+  assert.ok(min > 0, `侧倾出现了反向（最小 ${min}）—— 那是摇头不是侧耳`);
+  assert.ok(max <= listenFeel.lean + listenFeel.nodAmplitude + 1e-9);
+  // 要比闲置摇摆明显大一个量级，否则和 idle 分不开。
+  let swayPeak = 0;
+  for (let t = 0; t < 60000; t += 50) swayPeak = Math.max(swayPeak, Math.abs(sway(t)));
+  assert.ok(min > swayPeak * 2, `侧倾 ${min} 没比闲置摇摆峰值 ${swayPeak} 大出一截，看不出区别`);
+});
+
+test('聆听的进入/退出是插值的（amount 乘在所有项上）', () => {
+  const half = listenPose(0, 0.5);
+  const full = listenPose(0, 1);
+  assert.ok(Math.abs(half.rotation - full.rotation / 2) < 1e-9, '侧倾没按 amount 插值');
+  assert.ok(Math.abs(half.markAlpha - full.markAlpha / 2) < 1e-9, '标记没按 amount 淡出');
+  // 越界输入被夹住，不会把姿态算飞。
+  assert.deepEqual(listenPose(0, 9), full);
+  assert.deepEqual(listenPose(0, -3), { rotation: 0, markScale: 0, markAlpha: 0 });
+});
+
+test('reduceMotion 下聆听退化为静态：姿势与标记都在，但不随时间变', () => {
+  const a = listenPose(0, 1, false);
+  const b = listenPose(733, 1, false);
+  const c = listenPose(5219, 1, false);
+  assert.deepEqual(a, b);
+  assert.deepEqual(b, c);
+  assert.ok(a.rotation > 0, 'reduceMotion 下侧倾仍要保留 —— 它是姿势，不是动效');
+  assert.ok(a.markAlpha > 0.3, 'reduceMotion 下标记要常驻可见');
+});
+
+// ---------------------------------------------------------------------------
+// 命中区兜底
+// ---------------------------------------------------------------------------
+
+test('整身兜底框是个非空矩形，且把画幅中心包进去', () => {
+  const r = fullBodyFallback();
+  assert.equal(r.part, 'body');
+  assert.ok(r.x1 > r.x0 && r.y1 > r.y0, '兜底框不能是空矩形');
+  assert.ok(r.x0 < 0.5 && r.x1 > 0.5 && r.y0 < 0.5 && r.y1 > 0.5, '兜底框必须覆盖画幅中心');
+  for (const v of [r.x0, r.y0, r.x1, r.y1]) assert.ok(v >= 0 && v <= 1, '越界');
+});
+
+test('PoseRegion 与 shared 的 HitRegion 结构兼容（可以直接喂 setHitRegions）', () => {
+  // 这是一条**编译期**断言：pet/ 刻意不 import shared/desktop.ts（渲染层不该知道
+  // 桌面能力的存在），所以两边漂移只能靠这里挡。赋值不过就是 tsc 报错。
+  const region: PoseRegion = fullBodyFallback();
+  const asHit: HitRegion = region;
+  const back: PoseRegion = asHit;
+  assert.equal(back.part, 'body');
+});
+
+test('parsePoseRegions 拒绝没有整身兜底框 / 空矩形的清单', () => {
+  const full = (part: string) => ({ part, x0: 0.1, y0: 0.1, x1: 0.9, y1: 0.9 });
+  const poses = Object.fromEntries(actions.map((a) => [a, [full('body')]]));
+  assert.ok(parsePoseRegions({ version: '1', poses, degraded: [] }));
+  // 缺兜底框 —— 这正是「某个姿势点不中」的那个 bug，必须在加载时就炸。
+  assert.throws(
+    () => parsePoseRegions({ version: '1', poses: { ...poses, sleep: [full('head')] }, degraded: [] }),
+    /没有整身兜底框/,
+  );
+  assert.throws(
+    () =>
+      parsePoseRegions({
+        version: '1',
+        poses: { ...poses, sleep: [{ part: 'body', x0: 0.5, y0: 0.1, x1: 0.5, y1: 0.9 }] },
+        degraded: [],
+      }),
+    /空矩形/,
+  );
+  // 少一个动作也必须炸：漏掉的那个姿势在运行时就是「点不中」。
+  const { walk_b: _omitted, ...missing } = poses;
+  assert.throws(() => parsePoseRegions({ version: '1', poses: missing, degraded: [] }), /walk_b/);
+});
+
+test('清单里没有某个动作时 regionsFor 返回兜底框，不返回空数组', () => {
+  const poses = Object.fromEntries(
+    actions.map((a) => [a, [{ part: 'body', x0: 0.1, y0: 0.1, x1: 0.9, y1: 0.9 }]]),
+  );
+  const loaded = parsePoseRegions({ version: '1', poses, degraded: [] });
+  for (const a of actions) assert.ok(loaded.regionsFor(a).length >= 1, `${a} 的命中区是空的`);
+  // 契约外的动作名（以后加了枚举但清单没重跑）也要有东西兜住。
+  const unknown = loaded.regionsFor('not_an_action' as (typeof actions)[number]);
+  assert.deepEqual(unknown, [fullBodyFallback()]);
+});
+
+// ---------------------------------------------------------------------------
+// 拖动：原来这里有七条「抓娃娃机」手感的数学断言（站地时中性、支点搬到头顶、
+// 体积守恒、摆幅/切变有界、落地回弹先压后弹、摆幅不超窗口宽度预算）。
+//
+// 整组删掉了，因为那套表现被整个删掉了 —— 用户看过实际效果后要求「拖动时不做任何动作」。
+// 留着测一个不存在的功能只会让人以为它还在。详见 motion.ts 里的说明。
+// 现在和拖动有关的唯一约定是「setDragging 不产生任何姿态变化」，
+// 而那是一个空函数，没有可测的数学。
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // 单击反应
@@ -439,21 +504,80 @@ test('tapTargetOf 认得各部位，认不出的一律走 default（包括 null 
   assert.equal(tapTargetOf('elbow'), 'default');
   // 'default' 是内部组名，外部传进来也只应落到 default，不该被当成「某个部位」。
   assert.equal(tapTargetOf('default'), 'default');
+  // 整身兜底框的部位名也要能落到 default 组 —— 否则换姿势后点在身上会一点反应都没有。
+  assert.equal(tapTargetOf(fullBodyFallback().part), 'default');
 });
 
-test('摆角上限不会把脚甩出窗口（默认档位下的几何预算）', () => {
-  // 支点在头顶 → 脚底横移 = sin(θ)·(1−liftPivotY)·canvasH·scale。
-  // 默认档位：画布 512、显示高度 300（BASE_SIZE）、窗口宽 420（PET_WIDTH）、角色半宽约 88 px。
-  // 这条断言是为了让「调大 swingMax」这件事必须同时面对窗口宽度，而不是悄悄超出去。
-  const canvasH = 512;
-  const scale = 300 / canvasH;
-  const footShift = Math.sin(clawFeel.swingMax) * (1 - clawFeel.liftPivotY) * canvasH * scale;
-  const budget = 420 / 2 - 88;
+test('单击表情的保持时长比动作长，且落在「看得清又不会一直挂着」的区间', () => {
+  // 表情要比动作挂得久：动作是整身姿势一眼看完，表情在 220 px 下只有十几像素的五官。
   assert.ok(
-    footShift < budget,
-    `摆到上限时脚底横移 ${footShift.toFixed(0)} px 超过窗口余量 ${budget} px —— 脚会被窗口裁掉`,
+    tapExpressionHoldMs > tapActionHoldMs,
+    `表情 ${tapExpressionHoldMs}ms 不比动作 ${tapActionHoldMs}ms 长，看不清就塌回去了`,
   );
+  assert.ok(tapExpressionHoldMs >= 2000, '短于 2 s 的话用户还没把视线移到脸上就恢复了');
+  assert.ok(tapExpressionHoldMs <= 6000, '长于 6 s 等于「一直挂着」，会和她说话时的真实情绪打架');
+  // 必须远大于交叉淡入时长，否则表情还没淡完就开始倒计时回位。
+  assert.ok(tapExpressionHoldMs > crossfadeMs * 4);
 });
+
+// ---------------------------------------------------------------------------
+// 自动恢复的倒计时
+//
+// 这里测的是一条**产品规则**：点击引起的临时表情会自动回 neutral，
+// 而模型通过 express 工具设的表情不会 —— 实现上就是「模型路径 cancel()、点击路径 arm()」。
+// 渲染器本身要 Pixi 才能跑（这个环境没有 GUI），所以把这条规则做成了可单测的 HoldTimer。
+// ---------------------------------------------------------------------------
+
+test('倒计时到点只触发一次，之后保持静默', () => {
+  const t = new HoldTimer();
+  t.arm(100);
+  assert.equal(t.pending, true);
+  assert.equal(t.tick(60), false, '没到点就触发了');
+  assert.equal(t.tick(60), true, '到点了没触发');
+  assert.equal(t.pending, false);
+  assert.equal(t.tick(60), false, '到点后又触发了一次 —— 表情会被反复按回 neutral');
+  assert.equal(t.remaining, 0);
+});
+
+test('cancel 之后永远不会到点 —— 模型设的表情不该被自动抹掉', () => {
+  const t = new HoldTimer();
+  t.arm(tapExpressionHoldMs);
+  // 模型通过 express 工具设了新表情 → setExpression() → cancel()。
+  t.cancel();
+  let fired = false;
+  for (let i = 0; i < 1000; i++) fired = fired || t.tick(16);
+  assert.equal(fired, false, '模型设的表情在几秒后被自动恢复抹掉了');
+});
+
+test('重新 arm 会刷新倒计时（连点两次以最后一次为准）', () => {
+  const t = new HoldTimer();
+  t.arm(100);
+  t.tick(90);
+  t.arm(100); // 又点了一下
+  assert.equal(t.tick(90), false, '第二次点击没有刷新倒计时');
+  assert.equal(t.tick(20), true);
+});
+
+test('没 arm 过的倒计时不会凭空触发；arm(0) 等于取消', () => {
+  const t = new HoldTimer();
+  for (let i = 0; i < 100; i++) assert.equal(t.tick(16), false);
+  t.arm(0);
+  assert.equal(t.pending, false);
+  assert.equal(t.tick(16), false);
+  t.arm(-5);
+  assert.equal(t.tick(16), false);
+});
+
+test('一次超长帧（切回标签页）只补一次回位，不会攒出一串', () => {
+  const t = new HoldTimer();
+  t.arm(tapExpressionHoldMs);
+  assert.equal(t.tick(600000), true, '超长帧应该直接到点');
+  assert.equal(t.tick(600000), false, '到点后又触发了');
+});
+
+// 原来这里还有一条「摆角上限不会把脚甩出窗口」的几何预算断言，守的是 clawFeel.swingMax。
+// 参数和表现一起删了，所以断言也删了。现在角色的旋转只有 tilt（0.22 rad）和聆听侧倾
+// （0.13 rad），两者支点都在脚底 —— 绕脚底转不会把脚甩出窗口，没有需要守的预算。
 
 /** 确定性 PRNG（mulberry32）。测试里不能用 Math.random —— 失败必须可复现。 */
 function mulberry(seed: number) {

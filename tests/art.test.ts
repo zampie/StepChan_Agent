@@ -6,7 +6,14 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { inflateSync } from 'node:zlib';
-import { availableActions, isNoopAction, logoSlots, parseLogoManifest } from '../apps/web/src/pet';
+import {
+  availableActions,
+  isNoopAction,
+  logoSlots,
+  parseLogoManifest,
+  parsePoseRegions,
+} from '../apps/web/src/pet';
+
 import {
   actions,
   browStates,
@@ -370,7 +377,9 @@ test('logo 贴图存在，sha256 与尺寸都与声明一致', () => {
 test('logo 贴图的分辨率足够喂运行期尺寸（retina + 放大桌宠）', () => {
   // 桌宠最大 400 px、画布 512 → 最大显示倍率 400/512；再乘 dpr 2。
   // 贴图短边必须大于「最大 placement 直径 × 这个倍率」才不会糊。
-  const maxSize = Math.max(...logoSlots.map((s) => logo.manifest.placements[s]!.size));
+  const maxSize = Math.max(
+    ...actions.flatMap((a) => logoSlots.map((s) => logo.manifest.placements[a]?.[s]?.size ?? 0)),
+  );
   const needed = Math.ceil(maxSize * (400 / logo.manifest.canvas.height) * 2);
   assert.ok(
     logo.manifest.asset.width >= needed,
@@ -378,43 +387,99 @@ test('logo 贴图的分辨率足够喂运行期尺寸（retina + 放大桌宠）
   );
 });
 
-test('每个 placement 都盖得住实测的旧假徽章（这是「覆盖得住」的硬条件）', () => {
-  for (const slot of logoSlots) {
-    const p = logo.manifest.placements[slot];
-    assert.ok(p, `缺少 ${slot} 的 placement`);
-    assert.ok(p.coverRadius > 0, `${slot} 的 coverRadius 是 0 —— 没量过旧徽章`);
+test('每个动作都有 placement 条目，且每张姿势图上至少盖掉一枚假徽章', () => {
+  // 这是「logo 在所有姿势下都显示」那个修复的核心断言。
+  // 上一版只量了 idle，placements 只有两条记录、appliesTo 只有 idle/tilt，
+  // 其余 8 个动作露出 master 自带的假方块 —— 用户直接看出来了。
+  for (const name of actions) {
+    const frame = logo.manifest.placements[name];
+    assert.ok(frame, `动作 ${name} 没有 placement 条目（逐动作测量漏了一帧）`);
     assert.ok(
-      p.size / 2 >= p.coverRadius,
-      `${slot} 直径 ${p.size} 盖不住实测半径 ${p.coverRadius}`,
+      Object.keys(frame).length >= 1,
+      `动作 ${name} 一枚 logo 都不画 —— 那就又回到「这个姿势露出假徽章」了`,
     );
-    // 太大也不行：圆盘比旧徽章大一倍就成了另一个设计，而不是「替换徽章」。
-    assert.ok(p.size / 2 < p.coverRadius * 1.6, `${slot} 的 logo 比旧徽章大太多（${p.size}）`);
+    assert.ok(frame.hair, `动作 ${name} 缺发饰那枚 logo（它在每张图上都看得见，不该量不到）`);
+    assert.ok(logo.actionsWithLogo.has(name), `${name} 不在 actionsWithLogo 里`);
+  }
+});
+
+test('每个 placement 都盖得住**这一帧**实测的旧假徽章（「覆盖得住」的硬条件）', () => {
+  for (const name of actions) {
+    for (const slot of logoSlots) {
+      const p = logo.manifest.placements[name]?.[slot];
+      if (!p) continue; // 这个姿势下这一枚量不到，清单里就没有 —— 下面另有断言要求它被记账
+      assert.ok(p.coverRadius > 0, `${name}.${slot} 的 coverRadius 是 0 —— 没量过旧徽章`);
+      assert.ok(
+        p.size / 2 >= p.coverRadius,
+        `${name}.${slot} 直径 ${p.size} 盖不住实测半径 ${p.coverRadius}`,
+      );
+      // 太大也不行：圆盘比旧徽章大一倍就成了另一个设计，而不是「替换徽章」。
+      assert.ok(p.size / 2 < p.coverRadius * 1.6, `${name}.${slot} 的 logo 比旧徽章大太多（${p.size}）`);
+    }
+  }
+});
+
+test('逐帧位置确实各不相同 —— 不是把 idle 的那组抄了 10 遍', () => {
+  const key = (n: (typeof actions)[number]) => {
+    const p = logo.manifest.placements[n]?.hair;
+    return p ? `${p.cx},${p.cy}` : 'none';
+  };
+  const distinct = new Set(actions.map(key));
+  // tilt 和 idle 指向同一张图（rig.json 里 tilt 没有独立素材），所以相同是对的；
+  // 其余 8 个动作各是一张独立的姿势图，位置必须不同。
+  assert.equal(key('tilt'), key('idle'), 'tilt 用的就是 idle 的整身图，位置应当完全一致');
+  assert.ok(distinct.size >= 8, `只有 ${distinct.size} 组不同的发饰位置，看起来是照抄的`);
+});
+
+test('某一帧量不到的那一枚必须记进 degraded（不能静默少画一枚 logo）', () => {
+  for (const name of actions) {
+    for (const slot of logoSlots) {
+      if (logo.manifest.placements[name]?.[slot]) continue;
+      assert.ok(
+        logo.manifest.degraded.some((d) => d.name === `logo.${slot}.${name}`),
+        `${name} 的 ${slot} 没有 placement 也没有 degraded 记录 —— 这是个静默的缺失`,
+      );
+    }
+  }
+  for (const d of logo.manifest.degraded) {
+    assert.ok(d.reason.length > 5, `${d.name} 的降级原因太短：${d.reason}`);
   }
 });
 
 test('placement 落在画布内', () => {
   const { width, height } = logo.manifest.canvas;
-  for (const slot of logoSlots) {
-    const p = logo.manifest.placements[slot]!;
-    const r = p.size / 2;
-    assert.ok(p.cx - r >= 0 && p.cx + r <= width, `${slot} 横向越界`);
-    assert.ok(p.cy - r >= 0 && p.cy + r <= height, `${slot} 纵向越界`);
+  for (const name of actions) {
+    for (const slot of logoSlots) {
+      const p = logo.manifest.placements[name]?.[slot];
+      if (!p) continue;
+      const r = p.size / 2;
+      assert.ok(p.cx - r >= 0 && p.cx + r <= width, `${name}.${slot} 横向越界`);
+      assert.ok(p.cy - r >= 0 && p.cy + r <= height, `${name}.${slot} 纵向越界`);
+    }
   }
 });
 
-test('logo 的位置只声明在 idle 画幅成立的动作上，且这条限制写进了 degraded', () => {
-  // 换姿势的动作图上徽章挪位了，位置对不上。声明成「对所有动作都成立」就是在撒谎。
-  assert.ok(logo.appliesTo.has('idle'), 'idle 必须在 appliesTo 里');
-  for (const name of actions) {
-    if (name === 'idle' || name === 'tilt') continue;
-    assert.ok(!logo.appliesTo.has(name), `${name} 换了姿势，logo 位置不该声明对它成立`);
-  }
-  assert.ok(
-    logo.manifest.degraded.some((d) => d.name === 'logo.nonIdleActions'),
-    '「只在部分动作下显示」是降级，必须出现在 degraded 里',
-  );
-  for (const d of logo.manifest.degraded) {
-    assert.ok(d.reason.length > 5, `${d.name} 的降级原因太短：${d.reason}`);
+test('整脸 sprite 表情的徽章位置与 idle 一致（实测过，所以运行期沿用 idle 帧）', () => {
+  // 整脸图是满画幅的，会连身体一起盖掉，所以它们自带的假徽章在哪必须被量过。
+  // 流水线里有断言（超过 1.5 px 就报错），这里检查那份实测记录真的存在且确实一致 ——
+  // 否则「沿用 idle 帧」就是假设而不是结论。
+  const sprites = (logo.manifest.measured?.spriteExpressions ?? {}) as Record<
+    string,
+    { found: Record<string, { center: [number, number] }> }
+  >;
+  const idle = logo.manifest.placements.idle!;
+  const spriteNames = expressions.filter((e) => manifest.expressions[e]!.mode === 'sprite');
+  assert.ok(spriteNames.length > 0, '一个整脸 sprite 都没有？那 rig.json 变了');
+  for (const name of spriteNames) {
+    const rec = sprites[name];
+    assert.ok(rec, `整脸表情 ${name} 没有徽章实测记录`);
+    for (const slot of logoSlots) {
+      const got = rec.found[slot];
+      const want = idle[slot];
+      if (!got || !want) continue;
+      const d = Math.hypot(got.center[0] - want.cx, got.center[1] - want.cy);
+      assert.ok(d <= 1.5, `${name}.${slot} 的徽章与 idle 差 ${d.toFixed(2)} px，不该沿用 idle 帧`);
+    }
   }
 });
 
@@ -481,6 +546,109 @@ test('logo 的运行期副本已同步到 vite 的 public 目录', () => {
   assert.ok(
     !existsSync(path.join(pub, logo.manifest.source.svg)),
     '源 SVG 被同步进了 public —— 它只是留痕，不该进构建产物',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 逐姿势命中区（sidecar 清单 hitregions.json，见 apps/web/src/pet/poseRegions.ts）
+//
+// 这份数据修的是「睡觉姿势下鼠标完全选不中她」：命中判定在 Rust 侧用一份归一化矩形表，
+// 而那份表原来是按 idle 立姿量的，sleep 侧躺时一个矩形都命中不到 → 窗口保持穿透。
+// 所以这组测试的重点只有一个 —— **任何姿势都不能出现「零命中区」**。
+// ---------------------------------------------------------------------------
+
+const hitPath = path.join(rigDir, 'hitregions.json');
+const hit = parsePoseRegions(JSON.parse(readFileSync(hitPath, 'utf8')));
+
+test('每个动作都有命中区，且一定带整身兜底框（这是「点不中」的最后一道防线）', () => {
+  for (const name of actions) {
+    const list = hit.regionsFor(name);
+    assert.ok(list.length >= 1, `动作 ${name} 一个命中矩形都没有 —— 这就是 sleep 那个 bug`);
+    const body = list.filter((r) => r.part === 'body');
+    assert.equal(body.length, 1, `动作 ${name} 应该正好有一个整身兜底框，实际 ${body.length} 个`);
+    // 兜底框必须排在最后：顺序即优先级，排前面会把所有细分部位吃掉。
+    assert.equal(list[list.length - 1].part, 'body', `${name} 的兜底框不在最后`);
+  }
+});
+
+test('兜底框足够大：包住画幅中心，且不比角色自己的外接框小', () => {
+  const measured = (hit.manifest.measured?.poses ?? {}) as Record<
+    string,
+    { bodyBox: [number, number, number, number] }
+  >;
+  const side = manifest.canvas.width;
+  for (const name of actions) {
+    const body = hit.regionsFor(name).find((r) => r.part === 'body')!;
+    assert.ok(
+      body.x0 < 0.5 && body.x1 > 0.5,
+      `${name} 的兜底框横向不含中心（${body.x0}–${body.x1}）—— 点身体中线都可能落空`,
+    );
+    const m = measured[name];
+    if (!m) continue;
+    // 实测的 alpha 外接框必须落在兜底框里（允许 1 px 的取整误差）。
+    const eps = 1 / side;
+    assert.ok(body.x0 <= m.bodyBox[0] / side + eps, `${name} 兜底框左边切掉了角色`);
+    assert.ok(body.y0 <= m.bodyBox[1] / side + eps, `${name} 兜底框上边切掉了角色`);
+    assert.ok(body.x1 >= m.bodyBox[2] / side - eps, `${name} 兜底框右边切掉了角色`);
+    assert.ok(body.y1 >= m.bodyBox[3] / side - eps, `${name} 兜底框下边切掉了角色`);
+  }
+});
+
+test('命中矩形都是非空的、落在 0..1 内，且小目标大到点得中', () => {
+  // 0.055 × 300 px 的显示高度 ≈ 16 px。比这还小的矩形在实际桌宠尺寸下点不中，
+  // 等于白写一条（流水线里按 MIN_TAPPABLE=0.08 外扩，这里留了余量）。
+  const minSide = 0.055;
+  for (const name of actions) {
+    for (const r of hit.regionsFor(name)) {
+      assert.ok(r.x1 > r.x0 && r.y1 > r.y0, `${name}.${r.part} 是空矩形`);
+      for (const v of [r.x0, r.y0, r.x1, r.y1]) {
+        assert.ok(v >= 0 && v <= 1, `${name}.${r.part} 越界：${v}`);
+      }
+      assert.ok(
+        r.x1 - r.x0 >= minSide && r.y1 - r.y0 >= minSide,
+        `${name}.${r.part} 太小（${(r.x1 - r.x0).toFixed(3)}×${(r.y1 - r.y0).toFixed(3)}），点不中`,
+      );
+    }
+  }
+});
+
+test('命中区的部位名都是前端认得的，且顺序把小目标排在大目标前面', () => {
+  // 'badge' 落在 'head' 矩形内部，排后面就永远摸不到（原手工表的注释里就写着这件事）。
+  const rank = ['badge', 'cheek', 'hand', 'head', 'skirt', 'body'];
+  for (const name of actions) {
+    const list = hit.regionsFor(name);
+    let last = -1;
+    for (const r of list) {
+      const i = rank.indexOf(r.part);
+      assert.ok(i >= 0, `${name} 里出现了未知部位名 ${r.part}`);
+      assert.ok(i >= last, `${name} 的部位顺序不对：${r.part} 排在了更大的目标后面`);
+      last = i;
+    }
+  }
+});
+
+test('逐姿势命中区确实各不相同 —— 不是把 idle 那份抄了 10 遍', () => {
+  const key = (n: (typeof actions)[number]) =>
+    hit
+      .regionsFor(n)
+      .map((r) => `${r.part}:${r.x0.toFixed(3)},${r.y0.toFixed(3)}`)
+      .join('|');
+  const distinct = new Set(actions.map(key));
+  assert.equal(key('tilt'), key('idle'), 'tilt 用的就是 idle 的整身图，命中区应当完全一致');
+  assert.ok(distinct.size >= 8, `只有 ${distinct.size} 组不同的命中区，看起来是照抄的`);
+  // sleep 是这次要修的那一帧：它的头部矩形必须真的落在侧躺的头上，而不是 idle 的头顶位置。
+  const sleepHead = hit.regionsFor('sleep').find((r) => r.part === 'head')!;
+  const idleHead = hit.regionsFor('idle').find((r) => r.part === 'head')!;
+  assert.ok(
+    Math.abs(sleepHead.y0 - idleHead.y0) > 0.1,
+    'sleep 的头部矩形还在 idle 的位置上 —— 侧躺时它不在那儿',
+  );
+});
+
+test('命中区清单的运行期副本已同步到 vite 的 public 目录', () => {
+  assert.ok(
+    existsSync(path.join(root, 'apps/web/public/rig/hitregions.json')),
+    'public/rig 下缺 hitregions.json —— 跑 npm run sync-rig',
   );
 });
 

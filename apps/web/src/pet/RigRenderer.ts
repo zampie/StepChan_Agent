@@ -2,16 +2,18 @@
 //
 // 与旧版 PetRenderer 的区别：旧版是「整图换帧」——每个表情一张全身图，切表情就是换贴图。
 // 这里是 base 全身图 + 眼/眉/嘴覆盖层，覆盖层的位置来自 tools/art 的像素 diff 实测，
-// 不是手标的。动画全部程序化（呼吸、摇摆、眨眼、挤压拉伸、悬挂摆动、落地回弹），没有序列图。
+// 不是手标的。动画全部程序化（呼吸、摇摆、眨眼、挤压拉伸、交叉淡入），没有序列图。
 //
 // 三组对外行为，顺带说明各自的参数在哪（这里一个「手感数字」都不该硬编码）：
 //   - 表情 / 口型 / 动作：rig.json（tools/art/register.py 的像素 diff 配准）。
-//   - StepFun logo 图层：logo.json（tools/art/logo.py 的 SVG 几何 + 旧徽章实测覆盖半径）。
-//     位置/直径/自转全在清单里；本文件只放「怎么动」（LOGO_MOTION）。
-//   - 拖拽的抓娃娃机手感 + 单击反应：motion.ts 的 clawFeel / tapReactions.ts 的 tapPools。
+//   - StepFun logo 图层：logo.json（tools/art/logo.py 的 SVG 几何 + **逐画幅**实测的
+//     旧徽章中心与覆盖半径）。位置/直径/自转按动作分组放在清单里；本文件只放「怎么动」。
+//   - 单击反应：tapReactions.ts 的 tapPools；按住聆听：motion.ts 的 listenFeel。
+//
+// **拖动刻意不做任何表现**，见 motion.ts 里那段说明（用户看过实际效果后的决定）。
 //
 // 解耦约定：本文件不 import voice/ 或 brain/ 下的任何东西，也不监听任何 DOM 事件。
-// 音频电平、情绪意图、拖拽与单击都由 UI 推进来，渲染器只负责「怎么插值」。
+// 音频电平、情绪意图、拖拽、单击、按住聆听都由 UI 推进来，渲染器只负责「怎么插值」。
 import { Application, Assets, Container, Sprite, Texture } from 'pixi.js';
 // Pixi 默认用 new Function() 动态拼着色器/批处理代码，而我们的 CSP 是 script-src 'self'，
 // 于是 app.init() 直接抛 "Current environment does not allow unsafe-eval"，
@@ -30,21 +32,29 @@ import {
 } from '../../../../shared/pet';
 import {
   BlinkScheduler,
+  HoldTimer,
   ShuffleBag,
   Spring,
   breathe,
-  clawFeel,
-  clawPose,
   crossfadeMs,
   easeInOut,
   fxPose,
-  sagTarget,
+  listenFeel,
+  listenPose,
+  squash,
   sway,
-  swingTarget,
 } from './motion';
 import { loadRig, proceduralActions, isNoopAction, type LoadedRig } from './rigManifest';
-import { logoSlots, type LogoPlacement } from './logoManifest';
-import { tapActionHoldMs, tapPools, tapTargetOf, type TapReaction, type TapTarget } from './tapReactions';
+import { logoSlots, type LogoPlacement, type LogoSlot } from './logoManifest';
+import { fullBodyFallback, type PoseRegion } from './poseRegions';
+import {
+  tapActionHoldMs,
+  tapExpressionHoldMs,
+  tapPools,
+  tapTargetOf,
+  type TapReaction,
+  type TapTarget,
+} from './tapReactions';
 import { VisemeTracker } from './visemeMap';
 import { reportDiagnostic } from '../platform/diagnostics';
 
@@ -55,6 +65,18 @@ export interface RigRendererOptions {
   size?: number;
   reduceMotion?: boolean;
   onError?: (message: string) => void;
+  /**
+   * 姿势变化时回调**这个姿势**的命中区。
+   *
+   * 为什么要这个回调：命中判定在 Rust 侧（穿透一开，webview 收不到 mousemove），
+   * 而命中区表原来只按 idle 立姿量过一次。换姿势后身体整个挪了位置 ——
+   * sleep 侧躺时一个矩形都命中不到，鼠标直接穿透过去，点不中她。
+   *
+   * 坐标系与 shared/desktop.ts 的 hitRegionSchema 一致（归一化 0..1，素材画布），
+   * 所以可以直接喂给 desktop.setHitRegions()。
+   * 已经按姿势去重，同一个姿势不会反复回调；清单缺失时回调仍会发生，内容是整身兜底框。
+   */
+  onPoseRegions?: (regions: PoseRegion[], pose: ActionName) => void;
 }
 
 /** FX 相对画布的生成位置，单位是画布高度的比例（x 从中心算，y 从脚底往上算）。 */
@@ -110,6 +132,11 @@ const LOGO_MOTION = {
 /** 单击反馈的挤压冲量：先压一下，再由弹簧弹回（squash 输入 / 每秒）。 */
 const TAP_POKE = { squash: -0.1, velocity: 1.4 } as const;
 
+/** 按住聆听时强制的眼型。睁大眼是「我在听」最直接的一张脸。 */
+const LISTEN_EYES: EyeState = 'wide';
+/** 按住聆听时用作标记的特效素材（现有素材，不新生成）。音符 = 声音进来了。 */
+const LISTEN_MARK: FxName = 'note';
+
 interface Slot {
   /** 正在淡入的层。 */
   cur: Sprite;
@@ -126,10 +153,11 @@ interface FxInstance {
   baseY: number;
 }
 
-/** logo 的一枚实例：贴图 + 它在清单里的那份静态参数。 */
+/** logo 的一枚实例：贴图 + 它在**当前画幅**里的那份静态参数（换动作时整份替换）。 */
 interface LogoInstance {
+  slot: LogoSlot;
   sprite: Sprite;
-  placement: LogoPlacement;
+  placement: LogoPlacement | null;
 }
 
 export class RigRenderer {
@@ -171,29 +199,28 @@ export class RigRenderer {
   private viseme = new VisemeTracker();
   private blink = new BlinkScheduler();
 
-  private dragging = false;
-  private dragVx = 0;
-  private dragVy = 0;
-  // ---- 抓娃娃机：五根弹簧 ----
-  /** 被提起的程度 0..1。整个悬挂姿态都乘在它上面，所以放下时会平滑收回。 */
-  private liftSpring = new Spring(110, 17);
-  /** 悬挂摆角。刻意欠阻尼（临界阻尼 2√95 ≈ 19.5，这里 7.5）→ 会自己来回摆几下。 */
-  private swingSpring = new Spring(95, 7.5);
-  /** 下半身跟踪摆角的软弹簧。它和 swing 的差值就是「下身拖后一拍」。 */
-  private lagSpring = new Spring(48, 9);
-  /** 重力下垂（竖向拉伸）。 */
-  private sagSpring = new Spring(140, 15);
-  /** 程序化动作姿态（目前只有 tilt）。单独一根弹簧，和悬挂摆角叠加而不是互相覆盖。 */
+  /** 程序化动作姿态（目前只有 tilt）。单独一根弹簧，和聆听侧倾叠加而不是互相覆盖。 */
   private poseSpring = new Spring(120, 15);
-  private reboundSpring = new Spring(260, 12);
-  private rebound = 0;
-  /** 单击的挤压反馈。和落地回弹分开，免得点一下把正在回弹的动作打断。 */
+  /** 单击的挤压反馈。 */
   private tapSpring = new Spring(320, 12);
   /** 发饰那枚 logo 的滞后跟踪器（见 LOGO_MOTION）。 */
   private logoSpring = new Spring(LOGO_MOTION.stiffness, LOGO_MOTION.damping);
+  /** 「按住聆听」的进入程度 0..1。整个聆听姿态都乘在它上面，所以松手时平滑收回。 */
+  private listenSpring = new Spring(listenFeel.stiffness, listenFeel.damping);
+  private listening = false;
+  /** 聆听时耳边那枚常驻标记（现有 fx 素材，不是一次性特效）。 */
+  private listenMark = new Sprite();
 
-  /** 单击触发的临时动作剩余时长（ms）。归零时自动回 idle。 */
-  private tapActionLeft = 0;
+  /** 单击触发的临时动作剩余时长。归零时自动回 idle。 */
+  private tapAction = new HoldTimer();
+  /**
+   * 单击触发的临时**表情**倒计时。归零时自动回 neutral。
+   *
+   * 和动作的倒计时分开计，因为两者时长不同（姿势 1.4 s 够看，表情要 3.5 s 才读得出来）。
+   * 关键在于**只有这条路径有倒计时**：setExpression() 是模型通过 express 工具走的路，
+   * 那是她真实的情绪状态，不该几秒后被抹掉，所以 setExpression() 会 cancel 掉它。
+   */
+  private tapExpression = new HoldTimer();
   /** 每个部位一个洗牌袋，保证「每次换一个」。按需建，因为可用性要等素材加载完才知道。 */
   private tapBags = new Map<TapTarget, ShuffleBag<TapReaction>>();
 
@@ -202,12 +229,11 @@ export class RigRenderer {
   private size: number;
   private reduceMotion: boolean;
   private observer?: ResizeObserver;
-  /** 容器尺寸与上一帧的支点，供 layout() 在两帧之间保持姿态不跳。 */
+  /** 容器尺寸。 */
   private hostW = 0;
   private hostH = 0;
-  private lastPivotY = 1;
-  private lastRise = 0;
-  private lastScaleY = 1;
+  /** 上一次已经喊出去的命中区姿势，用来去重 —— 同一个姿势不要反复回调。 */
+  private emittedPose: ActionName | null = null;
 
   constructor(private opts: RigRendererOptions) {
     this.size = opts.size ?? 280;
@@ -220,14 +246,16 @@ export class RigRenderer {
 
   /**
    * 本次加载被降级的条目（供 UI 显示，不要静默吞掉）。
-   * 合并了 rig.json 与 logo.json 两份清单，以及 logo.json 本身加载失败的情况 ——
-   * logo 是 sidecar，它的降级不会出现在 rig.json 里，不合并就等于静默。
+   * 合并了 rig.json / logo.json / hitregions.json 三份清单，以及两份 sidecar 自身
+   * 加载失败的情况 —— sidecar 的降级不会出现在 rig.json 里，不合并就等于静默。
    */
   get degraded(): { name: string; reason: string }[] {
     return [
       ...(this.manifest?.degraded ?? []),
       ...(this.rig?.logo?.manifest.degraded ?? []),
       ...(this.rig?.logoError ? [{ name: 'logo', reason: this.rig.logoError }] : []),
+      ...(this.rig?.regions?.manifest.degraded ?? []),
+      ...(this.rig?.regionsError ? [{ name: 'hitRegions', reason: this.rig.regionsError }] : []),
     ];
   }
 
@@ -301,6 +329,10 @@ export class RigRenderer {
       // 没有这条日志的话根本看不出是 sidecar 清单没加载成功。
       reportDiagnostic(`rig: ${this.rig.logoError}`);
     }
+    if (this.rig.regionsError) {
+      // 同上。症状更隐蔽：命中区退回整身兜底框，部位细分（摸头/捏脸）全部失效。
+      reportDiagnostic(`rig: ${this.rig.regionsError}`);
+    }
 
     await this.loadTextures();
     if (this.disposed) return;
@@ -311,6 +343,9 @@ export class RigRenderer {
 
     this.buildScene();
     this.applyExpression(this.expression, true);
+    // 初始姿势（idle）的命中区也要喊一次 —— 否则在第一次换动作之前，
+    // 调用方手里一份命中区都没有。
+    this.emitPoseRegions();
 
     this.observer = new ResizeObserver(() => this.layout());
     this.observer.observe(this.opts.host);
@@ -331,22 +366,21 @@ export class RigRenderer {
     this.reduceMotion = on;
     if (on) {
       this.blink.reset();
-      for (const s of [
-        this.liftSpring,
-        this.swingSpring,
-        this.lagSpring,
-        this.sagSpring,
-        this.reboundSpring,
-        this.tapSpring,
-        this.logoSpring,
-      ]) {
-        s.snap(0);
-      }
-      this.rebound = 0;
+      for (const s of [this.poseSpring, this.tapSpring, this.logoSpring]) s.snap(0);
+      this.listenSpring.snap(this.listening ? 1 : 0);
     }
   }
 
+  /**
+   * 设置表情。**模型通过 express 工具走的就是这条路。**
+   *
+   * 和 reactToTap 的区别只有一个，但很重要：这里设的表情**不会自动恢复**。
+   * 那是她当前真实的情绪状态，几秒后把它抹掉等于把模型的输出吞了。
+   * 所以这里顺手取消单击的表情倒计时 —— 否则点一下再让她说句话，
+   * 3.5 秒后她的表情会莫名其妙塌回 neutral。
+   */
   setExpression(expression: Expression) {
+    this.tapExpression.cancel();
     if (expression === this.expression) return;
     this.applyExpression(expression, this.reduceMotion);
   }
@@ -364,7 +398,7 @@ export class RigRenderer {
 
   playAction(action: ActionName) {
     // 外部显式换动作 → 取消单击的自动回 idle，否则 1.4 s 后会把别人刚设的姿势抹掉。
-    this.tapActionLeft = 0;
+    this.tapAction.cancel();
     if (action === this.action) return;
     const asset = this.manifest?.actions[action];
     if (!asset) return;
@@ -379,7 +413,8 @@ export class RigRenderer {
     // 这不是偷懒，是流水线能保证的边界：动作图自带表情。
     // 程序化动作用的是 idle 的图，画幅没变，所以覆盖层继续有效。
     this.setLayersVisible(action === 'idle' || proceduralActions.has(action));
-    this.syncLogoVisibility();
+    this.syncLogoPlacements();
+    this.emitPoseRegions();
   }
 
   spawnFx(name: FxName) {
@@ -401,27 +436,42 @@ export class RigRenderer {
   }
 
   /**
-   * 拖拽状态。被提起时走「抓娃娃机」姿态：支点搬到头顶、身体垂下、随手摆动、放下落地回弹。
-   * 具体数学在 motion.ts 的 clawPose / clawFeel，参数都集中在 clawFeel 里。
+   * 拖拽状态。**刻意什么都不做。**
    *
-   * @param velocity 指针速度（px/s），决定摆幅与下垂量。不给就按 0 处理（提着不动）。
+   * 这里原来是一整套「抓娃娃机」悬挂表现（支点搬到头顶、身体垂下、随手摆动、落地回弹）。
+   * 用户看过实际效果后的结论是「效果不太好，取消拖动动画，拖动时不做任何动作」，
+   * 所以那套实现（五根弹簧 + clawPose + clawFeel + 对应单测）被整个删掉了，
+   * 拖动期间角色就是正常的 idle 呼吸。详见 motion.ts 里那段说明。
+   *
+   * 签名保留是因为 App.tsx 的手势处理仍然调它（拖动开始/结束各一次），
+   * 而且以后真要做点什么（比如换一张「被提起」的整身图）这就是入口。
+   * **想加回拖动动画之前先去问人** —— 这是产品决定，不是漏实现。
+   *
+   * @param _on 是否正在拖拽。
+   * @param _velocity 指针速度（px/s）。
    */
-  setDragging(on: boolean, velocity?: { x: number; y: number }) {
-    if (on) {
-      this.dragVx = velocity?.x ?? 0;
-      this.dragVy = velocity?.y ?? 0;
-      if (!this.dragging) this.rebound = 0;
-      this.dragging = true;
-    } else if (this.dragging) {
-      this.dragging = false;
-      this.dragVx = 0;
-      this.dragVy = 0;
-      // 落地回弹：从「压扁」出发给一个向上的初速度，让它自己冲过 0 再收敛 ——
-      // 顺序是砸地压扁 → 弹起拉长 → 稳住。反过来（先拉长）看起来像又被往上提了一下。
-      this.rebound = 1;
-      this.reboundSpring.value = -clawFeel.landBounce;
-      this.reboundSpring.velocity = clawFeel.landVelocity;
-    }
+  setDragging(_on: boolean, _velocity?: { x: number; y: number }) {
+    // 故意空实现，见上面的说明。
+  }
+
+  /**
+   * 「按住聆听」状态：按住桌宠说话时，给一个一眼能和 idle 区分开、而且**持续**的表现。
+   *
+   * 三件事同时发生（全部用现有素材 + 程序化，没有新素材）：
+   *   - 身体恒定侧倾 + 很慢的点头（motion.ts 的 listenPose，参数在 listenFeel）
+   *   - 眼睛强制睁大（rig.json 里现成的 eyes.wide 覆盖层）
+   *   - 耳边一枚常驻的音符标记（现有 fx-note 素材）做呼吸式脉动，透明度有下限 ——
+   *     不会像一次性 FX 那样淡出消失，这是「状态」而不是「动画」的关键
+   *
+   * reduceMotion 下退化为静态：侧倾与标记照常（它们是**姿势**，表达「我在听」），
+   * 但不点头、不脉动。
+   *
+   * 和表情/动作是正交的：聆听期间她照样可以是 happy、照样可以在 sit。
+   * 眼型是唯一会被压过去的 —— 睁大眼就是这个状态最直接的信号。
+   */
+  setListeningHold(on: boolean) {
+    this.listening = on;
+    if (this.reduceMotion) this.listenSpring.snap(on ? 1 : 0);
   }
 
   /**
@@ -438,11 +488,16 @@ export class RigRenderer {
     if (!this.ready || !this.manifest) return null;
     const reaction = this.nextTapReaction(tapTargetOf(part));
     if (!reaction) return null;
-    if (reaction.expression) this.setExpression(reaction.expression);
+    if (reaction.expression) {
+      this.setExpression(reaction.expression);
+      // setExpression 会把倒计时清零（模型设的表情不该过期），所以在后面设。
+      // 这就是「点击引起的临时表情」与「模型设的表情」唯一的区别所在。
+      this.tapExpression.arm(tapExpressionHoldMs);
+    }
     if (reaction.action) {
       this.playAction(reaction.action);
       // playAction 会把它清零（外部换动作要能取消自动回位），所以在后面设。
-      this.tapActionLeft = tapActionHoldMs;
+      this.tapAction.arm(tapActionHoldMs);
     }
     if (reaction.fx) this.spawnFx(reaction.fx);
     // 眨眼和挤压是纯动效，reduceMotion 下跳过；表情和动作是「状态」，照常生效。
@@ -462,15 +517,11 @@ export class RigRenderer {
     const dt = Math.min(0.05, Math.max(0.001, dtMs / 1000));
     this.clock += dtMs;
 
-    // 单击触发的临时动作到点就回 idle。用倒计时而不是 setTimeout：
+    // 单击触发的临时动作/表情到点就回位。两个都用倒计时而不是 setTimeout：
     // 渲染器销毁时不用额外清理，页面隐藏（ticker 停）时也不会在后台乱跳。
-    if (this.tapActionLeft > 0) {
-      this.tapActionLeft -= dtMs;
-      if (this.tapActionLeft <= 0) {
-        this.tapActionLeft = 0;
-        this.playAction('idle');
-      }
-    }
+    if (this.tapAction.tick(dtMs)) this.playAction('idle');
+    // setExpression 自己会 cancel 掉倒计时，所以这里不用再清一次。
+    if (this.tapExpression.tick(dtMs)) this.setExpression('neutral');
 
     this.stepFades(dtMs);
     this.stepFace(dtMs);
@@ -577,16 +628,30 @@ export class RigRenderer {
     this.buildLogo();
     this.body.addChild(this.logoLayer);
 
+    // 聆听标记挂在 fxLayer 上而不是 body 里：它和 FX 同级，跟着整体（呼吸、侧倾）走，
+    // 但不参与脸部覆盖层那套显隐逻辑 —— 它在任何动作、任何表情下都要能出现。
+    // 复用现成的 fx 贴图，没有新素材。
+    const markAsset = m.fx[LISTEN_MARK];
+    const markTex = markAsset && this.textures.get(markAsset.file);
+    if (markTex) {
+      this.listenMark.texture = markTex;
+      this.listenMark.anchor.set(0.5);
+      this.listenMark.visible = false;
+      this.fxLayer.addChild(this.listenMark);
+    } else {
+      reportDiagnostic(`聆听标记素材缺失（fx.${LISTEN_MARK}），按住说话时只有侧耳与睁大眼`);
+    }
+
     this.root.addChild(this.body, this.fxLayer);
     this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * m.anchor.y);
     this.app.stage.addChild(this.root);
   }
 
   /**
-   * 按 logo.json 的 placements 建 logo sprite。
+   * 按 logo.json 建 logo sprite：每个位置一枚，共两枚，建完就不再增删。
    *
-   * 位置/直径/自转全部来自清单，这里只做「清单 → sprite 属性」的翻译。
-   * 贴图是 256 px 的，按 placement.size 缩到 17–31 px —— 所以放大桌宠或换 retina
+   * 位置/直径/自转全部来自清单的**当前动作**那一格，这里只做「清单 → sprite 属性」的翻译。
+   * 贴图是 256 px 的，按 placement.size 缩到 17–35 px —— 所以放大桌宠或换 retina
    * 不会糊，而且以后想调大小只改 logo.py 的 COVER_MARGIN / LOGO_TUNING。
    */
   private buildLogo() {
@@ -599,29 +664,51 @@ export class RigRenderer {
       return;
     }
     for (const slot of logoSlots) {
-      const p = logo.manifest.placements[slot];
-      if (!p) continue;
       const sprite = new Sprite(tex);
       sprite.anchor.set(0.5);
-      sprite.width = p.size;
-      sprite.height = p.size;
-      sprite.position.set(p.cx, p.cy);
-      sprite.rotation = p.rotation;
+      sprite.visible = false;
       this.logoLayer.addChild(sprite);
-      this.logos.push({ sprite, placement: p });
+      this.logos.push({ slot, sprite, placement: null });
     }
-    this.syncLogoVisibility();
+    this.syncLogoPlacements();
   }
 
   /**
-   * logo 层只在 logo.json 的 appliesTo 列出的动作下显示。
+   * 把 logo sprite 对准**当前姿势**的实测位置。
    *
-   * 和脸部覆盖层同一条边界：位置是按 idle 画幅实测的，换姿势的动作图上徽章挪位了，
-   * 继续贴就会把 logo 贴到腋下。这条降级写在 logo.json 的 degraded 里，不是静默的。
+   * 每张姿势图上那两枚假徽章的位置都单独量过（tools/art/logo.py 的 find_badges），
+   * 所以换动作就是换一组 cx/cy/size —— 不再像上一版那样「只在 idle/tilt 显示」。
+   * 某个位置在这个姿势下量不到（实测 sleep 侧躺、hold 双手抱胸的胸前徽章被遮住）时，
+   * 清单里就没有那一格，这里对应地把那一枚藏起来 —— 不猜位置，宁可少画一枚。
    */
-  private syncLogoVisibility() {
+  private syncLogoPlacements() {
     const logo = this.rig?.logo;
-    this.logoLayer.visible = !!logo && logo.appliesTo.has(this.action) && this.logos.length > 0;
+    this.logoLayer.visible = !!logo && this.logos.length > 0;
+    if (!logo) return;
+    const frame = logo.placementsFor(this.action);
+    for (const l of this.logos) {
+      const p = frame[l.slot];
+      l.placement = p ?? null;
+      l.sprite.visible = !!p;
+      if (!p) continue;
+      l.sprite.width = p.size;
+      l.sprite.height = p.size;
+      l.sprite.position.set(p.cx, p.cy);
+      l.sprite.rotation = p.rotation;
+    }
+  }
+
+  /**
+   * 把当前姿势的命中区喊出去。按姿势去重 —— 同一个姿势不反复回调。
+   *
+   * 兜底是硬要求：清单缺失、或者某个姿势一个矩形都没量出来时，退回**整身外接框**。
+   * 宁可整只都能点，也不能像 sleep 那次一样一个矩形都命中不到、鼠标直接穿透过去。
+   */
+  private emitPoseRegions() {
+    const cb = this.opts.onPoseRegions;
+    if (!cb || this.emittedPose === this.action) return;
+    this.emittedPose = this.action;
+    cb(this.rig?.regions?.regionsFor(this.action) ?? [fullBodyFallback()], this.action);
   }
 
   /**
@@ -756,7 +843,10 @@ export class RigRenderer {
 
     // 眨眼只覆盖「睁着的」眼型。闭眼/笑眼再眨一次是自相矛盾的。
     const entry = m.expressions[this.expression];
-    const restEye: EyeState = entry && entry.mode === 'layers' ? entry.eyes : 'open';
+    let restEye: EyeState = entry && entry.mode === 'layers' ? entry.eyes : 'open';
+    // 按住聆听时强制睁大眼，压过表情自己的眼型 —— 这是「我在听」最直接的信号，
+    // 而且必须持续存在，所以不能让 happy 的笑眼把它盖回去。
+    if (this.listening) restEye = LISTEN_EYES;
     if (this.reduceMotion || NO_BLINK.has(restEye)) {
       this.setSlot(this.eyes, m.layers.eyes[restEye], restEye, true);
       return;
@@ -770,99 +860,90 @@ export class RigRenderer {
     const m = this.manifest!;
     const scale = this.size / m.canvas.height;
     const pose = PROCEDURAL_POSE[this.action]?.rotation ?? 0;
+    // 聆听的进入程度。reduceMotion 下 setListeningHold 已经把它钉到位，step 不会改变结论。
+    const listen = this.listenSpring.step(this.listening ? 1 : 0, dt);
+    const lp = listenPose(this.clock, listen, !this.reduceMotion);
+    this.applyListenMark(lp);
 
     if (this.reduceMotion) {
       this.root.scale.set(scale);
-      // reduceMotion 下程序化动作仍然生效 —— 它表达的是「姿势」，不是「动效」。
-      // 只是不做弹簧过渡，直接到位。拖拽的悬挂效果整个关掉。
-      this.root.rotation = pose;
+      // reduceMotion 下程序化动作与聆听侧倾仍然生效 —— 它们表达的是「姿势」，不是「动效」。
+      // 只是不做弹簧过渡，直接到位。
+      this.root.rotation = pose + lp.rotation;
       this.poseSpring.snap(pose);
-      this.body.skew.x = 0;
-      for (const l of this.logos) l.sprite.rotation = l.placement.rotation;
-      this.applyPivot(m.anchor.y, 0, scale);
+      for (const l of this.logos) if (l.placement) l.sprite.rotation = l.placement.rotation;
+      this.placeRoot();
       return;
     }
 
     const br = breathe(this.clock);
-
-    // ---- 抓娃娃机 ----
-    // lift 是「被提起的程度」，其余各项都乘在它上面（见 clawPose），所以放手时会平滑收回，
-    // 不需要额外的退出动画。
-    const lift = this.liftSpring.step(this.dragging ? 1 : 0, dt);
-    const swing = this.swingSpring.step(this.dragging ? swingTarget(this.dragVx) : 0, dt);
-    const lag = this.lagSpring.step(swing, dt);
-    const sag = this.sagSpring.step(this.dragging ? sagTarget(this.dragVy) : 0, dt);
-
-    let reboundS = 0;
-    if (this.rebound > 0) {
-      reboundS = this.reboundSpring.step(0, dt);
-      if (Math.abs(reboundS) < 0.002 && Math.abs(this.reboundSpring.velocity) < 0.02) {
-        this.rebound = 0;
-        this.reboundSpring.snap(0);
-      }
-    }
     // 单击挤压：目标恒为 0，靠 reactToTap 打进去的初值和初速度自由衰减。
-    const tap = this.tapSpring.step(0, dt);
-
-    const claw = clawPose(
-      { lift, swing, lag, sag, rebound: reboundS + tap },
-      clawFeel,
-      m.anchor.y,
-    );
-    const scaleX = scale * br.scaleX * claw.scaleX;
-    const scaleY = scale * br.scaleY * claw.scaleY;
+    const sq = squash(this.tapSpring.step(0, dt));
+    const scaleX = scale * br.scaleX * sq.scaleX;
+    const scaleY = scale * br.scaleY * sq.scaleY;
     this.root.scale.set(scaleX, scaleY);
-    // 站地时是「程序化姿势 + 闲置摇摆」；提起来后摇摆淡出、悬挂摆角接管。
-    // 两者不是互斥开关，而是按 lift 交叉淡入 —— 否则抓起/放下的瞬间会突然一跳。
-    this.root.rotation =
-      this.poseSpring.step(pose, dt) + claw.rotation + sway(this.clock) * (1 - lift);
-    // 下半身滞后的切变。支点是画幅顶（body 的局部原点），所以头顶 0 位移、脚底最大。
-    this.body.skew.x = claw.skewX;
-    this.applyPivot(claw.pivotY, claw.riseFrac, scaleY);
+    // 程序化姿势 + 聆听侧倾/点头 + 闲置摇摆。三者相加，不互相覆盖。
+    this.root.rotation = this.poseSpring.step(pose, dt) + lp.rotation + sway(this.clock);
+    this.placeRoot();
     this.stepLogo(this.root.rotation, dt);
   }
 
   /**
-   * 更新旋转支点与落脚点。
-   *
-   * 支点上移时**必须**反向补偿位置：Pixi 的 pivot 是在局部坐标里挖一个新原点，
-   * 不补偿的话把支点从脚底搬到头顶，角色会整体往下掉一个身高。
-   * 补偿式来自「脚底那一点要落在容器底边」：
-   *   screenY(脚底) = position.y + (anchorY − pivotY) · canvasH · scaleY ≡ hostH + rise
+   * 聆听标记（耳边那枚音符）的每帧更新。
+   * 位置固定在发饰那一侧，缩放与透明度由 listenPose 的脉动给 —— alpha 有下限，
+   * 所以只要还按着就一直看得见（这是「持续状态」与「一次性 FX」的区别）。
    */
-  private applyPivot(pivotY: number, riseFrac: number, scaleY: number) {
-    const m = this.manifest!;
-    const w = this.hostW || this.size;
-    const h = this.hostH || this.size;
-    this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * pivotY);
-    this.root.position.set(
-      w / 2,
-      h + riseFrac * this.size - (m.anchor.y - pivotY) * m.canvas.height * scaleY,
+  private applyListenMark(lp: { markScale: number; markAlpha: number }) {
+    if (!this.listenMark.texture || !this.manifest) return;
+    const visible = lp.markAlpha > 0.002;
+    this.listenMark.visible = visible;
+    if (!visible) return;
+    const m = this.manifest;
+    const h = m.canvas.height;
+    const side = h * lp.markScale;
+    this.listenMark.width = side;
+    this.listenMark.height = side;
+    this.listenMark.alpha = lp.markAlpha;
+    this.listenMark.position.set(
+      m.canvas.width * m.anchor.x + listenFeel.markX * h,
+      h * m.anchor.y - listenFeel.markY * h,
     );
-    this.lastPivotY = pivotY;
-    this.lastRise = riseFrac;
-    this.lastScaleY = scaleY;
+  }
+
+  /**
+   * 落位：支点固定在锚点（脚底中心），角色站在容器底边中间。
+   *
+   * 支点不再在帧与帧之间移动（原来被提起时会搬到头顶），所以这里不需要补偿项 ——
+   * 锚点和支点是同一点时，position 就是锚点在屏幕上的落点。
+   */
+  private placeRoot() {
+    const m = this.manifest!;
+    this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * m.anchor.y);
+    this.root.position.set((this.hostW || this.size) / 2, this.hostH || this.size);
   }
 
   /**
    * logo 的二级动作：软弹簧跟踪身体旋转，差值换算成额外自转。
    * jiggle=0 的位置（胸前）直接贴死，不走弹簧 —— 衣料上的东西不该自己晃。
+   * placement 为 null 的位置（这个姿势下徽章被遮住）整个跳过，sprite 本来就是隐藏的。
    */
   private stepLogo(bodyRotation: number, dt: number) {
     if (this.logos.length === 0) return;
     const tracked = this.logoSpring.step(bodyRotation, dt);
     const lagAngle = bodyRotation - tracked;
     for (const l of this.logos) {
-      if (l.placement.jiggle <= 0) {
-        l.sprite.rotation = l.placement.rotation;
+      const p = l.placement;
+      if (!p) continue;
+      if (p.jiggle <= 0) {
+        l.sprite.rotation = p.rotation;
         continue;
       }
       const extra = clamp(
-        lagAngle * LOGO_MOTION.followGain * l.placement.jiggle,
+        lagAngle * LOGO_MOTION.followGain * p.jiggle,
         -LOGO_MOTION.maxExtraRotation,
         LOGO_MOTION.maxExtraRotation,
       );
-      l.sprite.rotation = l.placement.rotation + extra;
+      l.sprite.rotation = p.rotation + extra;
     }
   }
 
@@ -906,9 +987,7 @@ export class RigRenderer {
     const m = this.manifest;
     this.root.scale.set(this.size / m.canvas.height);
     // 锚点在脚底中心 → 角色站在容器底部，窗口再小也不会把脚切掉。
-    // 用上一帧的支点而不是写死脚底：resize 可能发生在被提起来的中途，
-    // 写死的话会在下一帧 stepPose 纠正前闪一下。
-    this.applyPivot(this.lastPivotY, this.lastRise, this.lastScaleY);
+    this.placeRoot();
   }
 
   private onVisibility = () => {

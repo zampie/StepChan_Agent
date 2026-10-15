@@ -8,7 +8,7 @@ import { toolDefinitions, type PetEvent, type ToolName } from '../../../../share
 import type { Credentials, Desktop, Settings } from '../../../../shared/desktop';
 import { desktop as defaultDesktop } from '../platform/desktop';
 import { RealtimeSession, type TranscriptEntry } from '../voice/RealtimeSession';
-import { buildInstructions, summarizeTranscript, textNeedsTool } from './persona';
+import { buildInstructions, textRequestsMove, summarizeTranscript, textNeedsTool } from './persona';
 import { createToolExecutor, type ToolExecutorHandle } from './tools';
 
 export type BrainOptions = {
@@ -123,6 +123,18 @@ export class Brain {
     }
 
     const tools = createToolExecutor({
+      // move_to 的程序化闸门：以本回合用户最后说的那句话为准。
+      // 她自己想换地方待着时这里是 false，工具会被拒 —— 这是乱跳的根治办法，
+      // 比在 instructions 里求她别乱动可靠。
+      movementRequested: () => {
+        // 取 transcript 里最后一条用户发言。不另存一份 lastUserText：
+        // 那会和 session 的 transcript 产生两个真相源，换会话时必然漂。
+        const entries = this.session?.transcript ?? [];
+        for (let i = entries.length - 1; i >= 0; i--) {
+          if (entries[i].role === 'user') return textRequestsMove(entries[i].text);
+        }
+        return false;
+      },
       desktop: this.desktop,
       // 每次工具执行都重新读设置：用户可能刚在托盘里改了开关。
       getSettings: () => this.loadSettings(),

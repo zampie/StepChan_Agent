@@ -17,7 +17,7 @@ export function sway(tMs: number, amplitude = 0.018) {
   );
 }
 
-/** 临界阻尼弹簧，用于拖拽惯性与落地回弹。dt 单位为秒。 */
+/** 临界阻尼弹簧，用于姿态过渡（程序化动作、聆听状态）与单击的挤压反馈。dt 单位为秒。 */
 export class Spring {
   value = 0;
   velocity = 0;
@@ -49,122 +49,97 @@ export function squash(stretch: number) {
 }
 
 // ---------------------------------------------------------------------------
-// 抓娃娃机手感
+// 拖动：刻意不做任何表现
 // ---------------------------------------------------------------------------
 //
-// 目标：拖着走的时候像被夹子提起来 —— 身体垂下来、跟着手晃、放下时落地回弹。
+// 这里原来有一整套「抓娃娃机」手感：拖动时把旋转支点从脚底搬到头顶，身体竖向拉长、
+// 随手摆动、下半身切变滞后、放下时落地回弹。五根弹簧 + 一个 clawPose() 纯函数 + 一组
+// clawFeel 参数 + 七条单测。
 //
-// 关键一招不是加素材，是**把旋转支点从脚底搬到头顶**。站着的时候支点在脚底，
-// 旋转读作「身体歪了」；支点在头顶时，同一个旋转读作「吊着在摆」。这是单张整身图
-// 能做出悬挂感的根本原因，剩下的（下垂、滞后、回弹）都是在这个基础上叠的二级动作。
+// **它被整个删掉了，不是漏实现。** 用户看过实际效果后的结论是「效果不太好，取消拖动动画，
+// 拖动时不做任何动作」。所以 RigRenderer.setDragging() 现在是空实现（签名保留给 App.tsx），
+// 拖动期间角色就是正常的 idle 呼吸。
 //
-// 没有分离的手脚素材，所以「手脚垂下」是近似出来的：
-//   - 竖向拉伸（体积守恒）→ 整体被重力拉长，读作四肢和头发往下坠；
-//   - 下半身滞后的切变（skew.x，支点在画幅顶）→ 上身先动、下身拖后一拍。
-// 这是近似，不是真的分段骨骼。要更像就得有一张「被提起、手脚垂下」的全身图
-// （见报告里关于新增 action 枚举的建议）。
+// 想加回来之前先去问人 —— 这是产品决定，不是技术债。
+// （落地回弹也一起删了：它只服务于拖动。jump 是换整身图的动作，不走回弹。
+//  单击的挤压反馈还在，走 squash + 自己的一根弹簧，和拖动无关。）
 
-/**
- * 手感参数。全部集中在这里，单位写在字段上 —— 调手感只改这个对象。
- *
- * 几个数的来历：
- * - liftPivotY 0.09：master 的 alpha 外接框上沿在画幅 3% 处（Q 版头身比，头顶就是最高点），
- *   取 9% 让支点落在后脑勺偏上，而不是悬在空气里。
- * - swingMax 0.36 rad（20.6°）：**上限由窗口宽度决定，不是凭感觉挑的**。
- *   支点在头顶时脚底的横移是 sin(θ)·(1−liftPivotY)·canvasH·scale；
- *   默认档位（画布 512、显示高度 300 → scale 0.586）下 θ=0.36 约 96 px，
- *   加上角色半宽约 88 px 共 184 px，窗口半宽 210 px（PET_WIDTH 420）还剩 26 px。
- *   再调大就会把脚甩出窗口被裁掉 —— 要加大摆幅得先加宽窗口。
- * - swingPerVelocity 1400 px/s：指针以 ~500 px/s 拖动时就打满 swingMax。
- *   再快不会更夸张，避免角色转成陀螺。
- * - lagMax 0.035 rad：skew 的位移是 sin(skew)·y，画幅 512 下脚底横移约 18 px、头顶 0 px。
- *   这是「下身拖后一拍」能看出来但不至于把人撕开的量级。
- * - landVelocity 为正：回弹值从 -landBounce（压扁）出发向上冲过 0 再收敛，
- *   顺序是「砸地压扁 → 弹起拉长 → 稳住」。先压再弹，反了就像被人往上提了一下。
- */
-export const clawFeel = {
-  /** 被提起时整体抬升量，单位＝显示高度的比例。 */
-  liftRise: 0.06,
-  /** 提起后旋转支点的高度，单位＝素材画布高度的比例（0 = 画幅顶，1 = 脚底）。 */
-  liftPivotY: 0.09,
-  /** 摆角上限，rad。见上面的窗口宽度推导，别随手调大。 */
-  swingMax: 0.36,
-  /** 指针横向速度（px/s）换算摆角的除数。 */
-  swingPerVelocity: 1400,
-  /** 重力下垂的竖向拉伸上限（squash 的输入，体积守恒）。 */
-  sagMax: 0.085,
-  /** 下垂的静态占比：刚提起来还没动时就该垂着。 */
-  sagStatic: 0.6,
-  /** 竖向速度（px/s）换算剩余下垂量的除数。 */
-  sagPerVelocity: 2600,
-  /** 下半身滞后切变的上限，rad（Pixi 的 skew.x）。 */
-  lagMax: 0.035,
-  /** 摆角与滞后角之差换算切变的增益。 */
-  lagGain: 0.22,
-  /** 落地回弹的初始压缩量与初速度（squash 输入 / 每秒）。 */
-  landBounce: 0.26,
-  landVelocity: 1.8,
+// ---------------------------------------------------------------------------
+// 按住聆听：持续的视觉状态
+// ---------------------------------------------------------------------------
+//
+// 关掉「持续聆听」后，长按桌宠 = 按住说话。按住期间必须有一个**一眼能和普通 idle 区分开、
+// 而且持续存在**的状态，否则用户不知道麦克风到底开没开。
+//
+// 没有新素材，全部用现有素材 + 程序化叠出来，三件事同时发生：
+//   1. 侧耳：身体恒定侧倾（lean）—— 支点在脚底，整体倾斜在 Q 版头身比下读作「侧着头听」。
+//      它是**姿势**不是动效，所以 reduceMotion 下也保留，只是不走弹簧过渡。
+//   2. 慢速点头（nod）：在 lean 上叠一个很慢的正弦，读作「嗯、在听」。这是动效，
+//      reduceMotion 下关掉（amount 仍然给，但调用方传 motion=false）。
+//   3. 耳边的音符标记（现有 fx-note 素材）做呼吸式脉动：缩放与透明度在两个下限之上来回，
+//      **永远不会掉到 0** —— 这就是「持续状态」与「一次性特效」的区别。
+//      FX 的生命周期曲线（fxPose）会淡出到 0，所以这里不能复用它。
+//
+// 眼型（eyes.wide）由渲染器直接换覆盖层，不在这里 —— 它不是时间函数。
+
+/** 聆听状态的手感参数。单位写在字段上，调手感只改这个对象。 */
+export const listenFeel = {
+  /** 侧耳倾听的恒定倾角，rad（≈7.4°）。比 tilt 的 0.22 小得多：tilt 是「歪头」，这是「侧耳」。 */
+  lean: 0.13,
+  /** 叠在 lean 上的慢速点头幅度，rad。约为 sway 峰值的 1.4 倍，看得出但不晃。 */
+  nodAmplitude: 0.026,
+  /** 点头周期，ms。1.6 s 一次 ≈ 人听话时点头的速度。 */
+  nodPeriodMs: 1600,
+  /** 音符标记的脉动周期，ms。比点头快一点，两者不同步才像两件事。 */
+  pulsePeriodMs: 1100,
+  /** 标记缩放的下限 / 上限，单位＝画布高度的比例。 */
+  markScaleMin: 0.15,
+  markScaleMax: 0.19,
+  /** 标记透明度的下限 / 上限。下限 > 0 是「持续可见」的保证。 */
+  markAlphaMin: 0.62,
+  markAlphaMax: 1,
+  /** 标记相对画布的位置：x 从中心算（正＝角色右侧，也就是发饰那一侧），y 从脚底往上算。 */
+  markX: 0.3,
+  markY: 0.78,
+  /** 进入/退出的弹簧（临界阻尼附近，不要回弹 —— 聆听状态不该有「弹一下」）。 */
+  stiffness: 150,
+  damping: 22,
 } as const;
 
-export type ClawFeel = typeof clawFeel;
+export type ListenFeel = typeof listenFeel;
 
-/**
- * 悬挂摆动的目标角：横向速度越大摆得越开，方向与拖动相反（身体落在手后面）。
- * `|| 0` 不是多余的：`-0 / k` 是 `-0`，让它流进变换里虽然无害，但会把
- * 「静止时必须严格为 0」这类断言变成要靠 Object.is 去绕的噪声。
- */
-export function swingTarget(vx: number, cfg: ClawFeel = clawFeel) {
-  return clamp(-vx / cfg.swingPerVelocity, -cfg.swingMax, cfg.swingMax) || 0;
-}
-
-/** 重力下垂的目标量：提起来就有底量，竖向速度再加一点（被往上拽时拉得更长）。 */
-export function sagTarget(vy: number, cfg: ClawFeel = clawFeel) {
-  const dynamic = Math.min(1, Math.abs(vy) / cfg.sagPerVelocity) * (1 - cfg.sagStatic);
-  return cfg.sagMax * (cfg.sagStatic + dynamic);
-}
-
-export interface ClawInput {
-  /** 0 = 站在地上，1 = 完全被提起。由弹簧平滑，不要直接给 0/1 的阶跃。 */
-  lift: number;
-  /** 当前摆角，rad（欠阻尼弹簧的输出）。 */
-  swing: number;
-  /** 下半身跟随摆角的滞后值，rad（更软的弹簧跟踪 swing）。 */
-  lag: number;
-  /** 重力下垂量（squash 输入）。 */
-  sag: number;
-  /** 落地回弹量（squash 输入，负值＝压扁）。 */
-  rebound: number;
-}
-
-export interface ClawPose {
-  /** 旋转支点的 y，单位＝画布高度比例（1 = 脚底，也就是站立时的锚点）。 */
-  pivotY: number;
-  /** 竖直抬升，单位＝显示高度比例。负值向上。 */
-  riseFrac: number;
+export interface ListenPose {
   /** 叠加到 root 的旋转，rad。 */
   rotation: number;
-  /** 叠加到身体容器的切变，rad。 */
-  skewX: number;
-  scaleX: number;
-  scaleY: number;
+  /** 音符标记的边长，单位＝画布高度的比例。amount=0 时为 0。 */
+  markScale: number;
+  /** 音符标记的透明度。amount=0 时为 0。 */
+  markAlpha: number;
 }
 
 /**
- * 把五个标量合成一个姿态。纯函数，没有 Pixi —— 手感的数学性质可以单测
- * （站地时必须完全中性、体积守恒、各项有界）。
+ * 聆听姿态。纯函数 —— 「持续可见」「有界」「静止时完全中性」这些性质可以单测。
  *
- * @param anchorY 站立时的锚点高度比例，默认 1（脚底）。
+ * @param tMs    时钟
+ * @param amount 0 = 没在听，1 = 完全进入聆听。由弹簧平滑，不要直接给 0/1 的阶跃。
+ * @param motion false = reduceMotion：保留姿势与常驻标记，去掉点头和脉动。
  */
-export function clawPose(input: ClawInput, cfg: ClawFeel = clawFeel, anchorY = 1): ClawPose {
-  const lift = clamp(input.lift, 0, 1);
-  const sq = squash(input.sag * lift + input.rebound);
+export function listenPose(
+  tMs: number,
+  amount: number,
+  motion = true,
+  cfg: ListenFeel = listenFeel,
+): ListenPose {
+  const a = clamp(amount, 0, 1);
+  if (a <= 0) return { rotation: 0, markScale: 0, markAlpha: 0 };
+  const nod = motion ? Math.sin((tMs / cfg.nodPeriodMs) * Math.PI * 2) * cfg.nodAmplitude : 0;
+  // 0..1 的脉动相位。reduceMotion 下钉在中间值，标记就是个常驻静态图标。
+  const pulse = motion ? (1 - Math.cos((tMs / cfg.pulsePeriodMs) * Math.PI * 2)) / 2 : 0.5;
   return {
-    pivotY: anchorY + (cfg.liftPivotY - anchorY) * lift,
-    riseFrac: -(cfg.liftRise * lift) || 0,
-    rotation: input.swing * lift,
-    skewX: clamp((input.swing - input.lag) * cfg.lagGain, -cfg.lagMax, cfg.lagMax) * lift,
-    scaleX: sq.scaleX,
-    scaleY: sq.scaleY,
+    rotation: (cfg.lean + nod) * a,
+    markScale: (cfg.markScaleMin + (cfg.markScaleMax - cfg.markScaleMin) * pulse) * a,
+    // 淡入淡出乘在 amount 上，所以松手时标记是消失而不是突然不见。
+    markAlpha: (cfg.markAlphaMin + (cfg.markAlphaMax - cfg.markAlphaMin) * pulse) * a,
   };
 }
 
@@ -308,8 +283,58 @@ export class BlinkScheduler {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 临时状态的倒计时
+// ---------------------------------------------------------------------------
+
+/**
+ * 「保持 N 毫秒然后自动回位」的倒计时。
+ *
+ * 为什么不是 setTimeout：
+ *   - 页面隐藏时 ticker 会停（见 RigRenderer.onVisibility），倒计时就该跟着停 ——
+ *     用 setTimeout 的话，切回标签页的瞬间会把攒下的回位一股脑执行掉；
+ *   - 渲染器销毁时不需要额外清理，没有「已销毁对象上的回调」这类问题。
+ *
+ * 为什么单独成类而不是在渲染器里写两个 number：这个类**承载了一条产品规则** ——
+ * 单击引起的临时状态会自动恢复，而模型主动设的状态不会。实现上就是
+ * 「模型路径调 cancel()，单击路径调 arm()」，所以它值得被单测。
+ */
+export class HoldTimer {
+  private left = 0;
+
+  /** 还在倒计时中。 */
+  get pending() {
+    return this.left > 0;
+  }
+
+  /** 剩余毫秒（没在计时时为 0）。只给测试和诊断看。 */
+  get remaining() {
+    return this.left;
+  }
+
+  /** 开始（或重新开始）倒计时。ms ≤ 0 等于取消。 */
+  arm(ms: number) {
+    this.left = ms > 0 ? ms : 0;
+  }
+
+  /** 取消。模型主动设状态时走这里 —— 它设的东西不该过期。 */
+  cancel() {
+    this.left = 0;
+  }
+
+  /** @returns 本帧是否刚刚到点（只会返回一次 true）。 */
+  tick(dtMs: number): boolean {
+    if (this.left <= 0) return false;
+    this.left -= dtMs;
+    if (this.left > 0) return false;
+    this.left = 0;
+    return true;
+  }
+}
+
 /** 交叉淡入的进度曲线。150ms 是实测舒服的值：再短像闪，再长像卡。 */
 export const crossfadeMs = 150;
+
 
 export function easeInOut(t: number) {
   const x = Math.min(1, Math.max(0, t));

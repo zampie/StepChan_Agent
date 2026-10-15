@@ -14,7 +14,25 @@ export {
 } from './ChatSession';
 export { SpeechSynthesizer, type SpeechSink, type SpeechSynthesizerOptions } from './tts';
 export { SentenceBuffer, spokenText } from './sentences';
-export { decodeWav, pcm16ToBase64, resample, toMono, type DecodedWav } from './wav';
+export {
+  base64ToBytes,
+  bytesToBase64,
+  concatPcm16,
+  decodeWav,
+  encodeWav,
+  pcm16ToBase64,
+  resample,
+  toMono,
+  type DecodedWav,
+} from './wav';
+export { transcribePcm16, AsrError, ASR_URL, ASR_MODEL, ASR_HOTWORDS } from './asr';
+export {
+  PushToTalkRecorder,
+  MAX_PUSH_TO_TALK_MS,
+  type MicLike,
+  type PushToTalkEvents,
+  type PushToTalkOptions,
+} from './listen';
 export { readSseData } from './sse';
 export {
   ChatHttpError,
