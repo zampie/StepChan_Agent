@@ -9,23 +9,6 @@
 // 勾选项的状态每次弹出时按当前设置重建，所以不需要维护菜单实例。
 import type { Settings } from '../../../../shared/desktop';
 
-/**
- * 语速档位。细调（0.8~1.8 连续）在设置窗里。
- *
- * **1.00 是默认档**，而且它是唯一一个完全不经过时间伸缩的档
- * （见 audio-playback.js 的旁路路径）：音质上没有任何处理痕迹，首音延迟也最低。
- *
- * 为什么默认不是更快的档：reaction 模式（realtime）的模型按**实时速度**出音，
- * 以 >1 倍播放就得比声音到达更快地消耗它，必须先攒一段缓冲再开口 ——
- * 1.15 档的首音延迟会从约 0.2 秒涨到约 0.65 秒。对桌宠来说"马上应声"比
- * "语速快一点"值钱得多，所以加速是**用户主动选**的，不是默认。
- * （chat 模式是服务端调速，没有这个代价；差异在设置窗里有说明。）
- */
-export const SPEECH_RATE_PRESETS: { label: string; value: number }[] = [
-  { label: '原速（1.00×）', value: 1.0 },
-  { label: '快一点（1.15×）', value: 1.15 },
-  { label: '更快（1.30×）', value: 1.3 },
-];
 
 
 export type PetMenuActions = {
@@ -54,33 +37,11 @@ export async function popupPetMenu(
     const { MenuItem } = await import('@tauri-apps/api/menu/menuItem');
     const { CheckMenuItem } = await import('@tauri-apps/api/menu/checkMenuItem');
     const { PredefinedMenuItem } = await import('@tauri-apps/api/menu/predefinedMenuItem');
-    const { Submenu } = await import('@tauri-apps/api/menu/submenu');
 
     const sep = () => PredefinedMenuItem.new({ item: 'Separator' });
     const check = (id: string, text: string, checked: boolean, action: () => void) =>
       CheckMenuItem.new({ id, text, checked, action });
 
-    // 语速放子菜单里给三个档位。原生菜单没有滑块，细调去设置窗 ——
-    // 这里只要「嫌慢/嫌快」一键能改。
-    //
-    // 子菜单标题带上代价：reaction 模式（realtime）里 >1 的档要靠预缓冲才不断续，
-    // 首音会晚约半秒；chat 模式是服务端调速，一点代价都没有。这个差异用户听得出来，
-    // 但原生菜单项放不下一段说明，所以压到标题里，细节在设置窗。
-    const speedMenu = async () => {
-      const cost =
-        settings.brainMode === 'realtime' ? '语速（>1 倍出声会晚约半秒）' : '语速';
-      const items = await Promise.all(
-        SPEECH_RATE_PRESETS.map((preset) =>
-          check(
-            `rate_${preset.value}`,
-            preset.label,
-            Math.abs(settings.speechRate - preset.value) < 0.03,
-            () => actions.onPatchSettings({ speechRate: preset.value }),
-          ),
-        ),
-      );
-      return Submenu.new({ id: 'speech_rate', text: cost, items });
-    };
 
     const items = await Promise.all([
       MenuItem.new({ id: 'type', text: '打字跟她说…', action: actions.onType }),
@@ -88,7 +49,6 @@ export async function popupPetMenu(
       check('voice', '语音对话', settings.voiceEnabled, () =>
         actions.onPatchSettings({ voiceEnabled: !settings.voiceEnabled }),
       ),
-      speedMenu(),
       // 关掉持续聆听之后改为「长按她说话」，这样环境噪声完全进不来。
       check('listening', '持续聆听（关闭后长按她说话）', settings.listening, () =>
         actions.onPatchSettings({ listening: !settings.listening }),

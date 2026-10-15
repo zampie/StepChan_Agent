@@ -22,6 +22,7 @@ import type { PetEvent, ToolName, ToolResult } from '../../../../shared/brain';
 import { toolArgSchemas, toolNames } from '../../../../shared/brain';
 import { SpeechStream } from './SpeechStream';
 import { MicStream } from './MicStream';
+import { reportDiagnostic } from '../platform/diagnostics';
 
 /** 一轮最多执行多少个工具。防止模型自循环把额度烧光。 */
 export const MAX_TOOL_CALLS_PER_TURN = 4;
@@ -124,6 +125,8 @@ export class RealtimeSession {
   /** 本次长按已经送出去多少帧音频。见 MIN_PUSH_TO_TALK_FRAMES。 */
   private pttFrames = 0;
 
+  /** 送出的麦克风帧数。只用于诊断。 */
+  private micFrames = 0;
   private userPartial = '';
   private petPartial = '';
   readonly transcript: TranscriptEntry[] = [];
@@ -434,13 +437,18 @@ export class RealtimeSession {
         ? {
             type: 'server_vad',
             // 文档默认值在桌宠场景下不可用：silence_duration_ms 默认 **100ms**，
-            // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合；
-            // energy_awakeness_threshold 默认 2500（范围 0–5000）在室内环境下偏低，
-            // 键盘声、风扇、远处人声都能把她唤起来，噪声全进了对话。
-            // 这里按「一句话说完再回」调：停顿容忍到 700ms，能量门限抬到 3400。
+            // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合。
+            // 停顿容忍抬到 700ms。
+            //
+            // energy_awakeness_threshold 曾经抬到 3400 来挡环境噪声，但实测发现
+            // 这会把**低增益的输入整个挡掉** —— 用户的 AirPods 自检峰值只有 0.001，
+            // 那种电平永远跨不过 3400，表现是「麦克风检测通过但说话毫无反应」。
+            // 现在回到接近文档默认的 2200：噪声误触发的代价已经小得多了，因为
+            // 「可打断」默认关闭（见 voiceInterruptible），噪声最多多开一个回合，
+            // 不会再把她说到一半的话砍掉。宁可偶尔多听一句，也不要听不见。
             prefix_padding_ms: 300,
             silence_duration_ms: 700,
-            energy_awakeness_threshold: 3400,
+            energy_awakeness_threshold: 2200,
           }
         : // 按住说话：服务端 VAD 必须关掉，否则它会在用户还按着的时候
           // 按停顿把一句话截成好几个回合。关掉之后断句完全由长按手势决定，
@@ -691,6 +699,9 @@ export class RealtimeSession {
 
       // ---- 打断：headline feature ----
       case 'input_audio_buffer.speech_started': {
+        // 服务端 VAD 真的听见了人声 —— 这是「说话没反应」排查里最关键的一条分界：
+        // 有这条说明音频通了、门限也过了，问题在后面；没有则在前面。
+        reportDiagnostic('vad: 服务端检测到人声开始');
         // 「可打断」关着的时候，她说话期间的 VAD 事件被完全忽略 —— 连压音量都不做。
         // 这不是偷懒：环境噪声和她自己从扬声器出来的声音都会触发 VAD，
         // 压一下音量再恢复听上去就是她说话一卡一卡的。想打断就长按或按 Esc
@@ -740,6 +751,7 @@ export class RealtimeSession {
         return;
       }
       case 'conversation.item.input_audio_transcription.completed': {
+        reportDiagnostic(`asr: 转写完成「${(event.transcript ?? '').slice(0, 40)}」`);
         const text = (event.transcript ?? this.userPartial).trim();
         this.userPartial = '';
         if (!text) return;

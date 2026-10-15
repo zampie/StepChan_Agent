@@ -152,11 +152,7 @@ export class ChatBrain {
     this.emit({ type: 'connection', state: 'connecting' });
 
     const createAudio =
-      // rate 必须显式钉成 1：chat 模式的语速是**服务端**调的
-      // （tts.ts 把 speed 发给 /v1/audio/speech），播放侧再变速就变成乘积 ——
-      // 选 1.3 会听到 1.69×。显式传 rate 的实例不受全局 setSpeechRate 影响。
-      this.options.createAudio ??
-      ((events: AudioOutputEvents) => new SpeechStream(events, { rate: 1 }));
+      this.options.createAudio ?? ((events: AudioOutputEvents) => new SpeechStream(events));
     const audio = createAudio({
       onLevel: (level) => {
         this.level = level;
@@ -183,7 +179,6 @@ export class ChatBrain {
       getApiKey: async () => (await this.loadCredentials()).apiKey,
       // 每段都重新读设置里的音色：chat 模式换音色不用重建任何东西。
       getVoice: () => this.settings?.voice ?? settings.voice,
-      getSpeechRate: () => this.settings?.speechRate ?? settings.speechRate,
       sink: audio,
       onError: (message) => this.emit({ type: 'error', message }),
       fetchImpl: this.options.fetchImpl,

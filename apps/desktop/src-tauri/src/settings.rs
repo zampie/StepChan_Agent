@@ -20,7 +20,6 @@ fn defaults() -> Value {
     json!({
         "voice": "yuanqishaonv",
         "voiceEnabled": true,
-        "speechRate": 1.0,
         "listening": true,
         "voiceInterruptible": false,
         "brainMode": "realtime",

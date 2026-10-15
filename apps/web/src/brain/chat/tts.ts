@@ -40,8 +40,6 @@ export type SpeechSynthesizerOptions = {
   getApiKey: () => Promise<string>;
   /** 每段都重新读 —— 用户随时可能在托盘里换音色，chat 模式换音色不用重建任何东西。 */
   getVoice: () => string;
-  /** 语速倍率。服务端调速，所以播放侧不再处理。 */
-  getSpeechRate: () => number;
   sink: SpeechSink;
   onError?: (message: string) => void;
   /** 注入点，测试/探测脚本里塞假的。 */
@@ -129,10 +127,6 @@ export class SpeechSynthesizer {
           voice: this.options.getVoice(),
           input: text,
           response_format: 'wav',
-          // 实测 /v1/audio/speech 的 speed 真的生效（3.84s → speed=1.5 得 2.88s）。
-          // chat 模式**不要**再叠播放侧的 WSOLA —— 服务端已经调过速了，
-          // 两处都调会变成乘积。
-          speed: this.options.getSpeechRate(),
           sample_rate: REALTIME_SAMPLE_RATE,
           ...(this.options.instruction ? { instruction: this.options.instruction } : {}),
         }),

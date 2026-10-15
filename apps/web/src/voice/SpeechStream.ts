@@ -4,50 +4,11 @@
 // 解 base64、按需重采样信息传给 worklet、暴露 0..1 的音量给口型用、
 // 把语速（播放侧时间伸缩的倍率）同步给 worklet。
 import { REALTIME_SAMPLE_RATE } from '../../../../shared/realtime';
-import { defaultSettings } from '../../../../shared/desktop';
 
-/** 语速范围，与 shared/desktop.ts 的 settings.speechRate 一致。 */
-export const MIN_SPEECH_RATE = 0.8;
-export const MAX_SPEECH_RATE = 1.8;
-
-export function clampSpeechRate(rate: number): number {
-  if (!Number.isFinite(rate)) return defaultSettings.speechRate;
-  return Math.min(MAX_SPEECH_RATE, Math.max(MIN_SPEECH_RATE, rate));
-}
-
-/**
- * 当前的播放语速。
- *
- * 为什么是模块级而不是构造参数：SpeechStream 由 RealtimeSession 和 ChatBrain
- * 各自 new 出来（也可能在一次会话里重建多次），而语速是**一个全局的用户设置**。
- * 放在模块级意味着集成层只要在设置变更时调一次 setSpeechRate()，
- * 之后新建的实例自动带上正确的倍率，不用把它穿过两条链路的构造函数。
- *
- * **但 chat 模式不该跟这个值。** chat 模式是服务端调速（/v1/audio/speech 的 speed
- * 参数，见 brain/chat/tts.ts），拿到的 PCM 本身就是加速过的；再叠一层播放侧的
- * WSOLA 等于把倍率乘起来（1.15 档会变成 1.32×）。chat 模式要用
- * `new SpeechStream(events, { rate: 1 })` 显式钉住原速。
- */
-let speechRate = clampSpeechRate(defaultSettings.speechRate);
-/** 活着的实例。setSpeechRate 要立刻作用到正在说话的那一个。 */
-const live = new Set<SpeechStream>();
-
-/**
- * 改变所有**跟随全局设置**的播放实例的语速。运行时随时可调。
- * 构造时显式传了 rate 的实例（chat 模式）不受影响 —— 见上面的注释。
- */
-export function setSpeechRate(rate: number): number {
-  speechRate = clampSpeechRate(rate);
-  for (const stream of live) {
-    if (!stream.ratePinned) stream.setRate(speechRate);
-  }
-  return speechRate;
-}
-
-export function currentSpeechRate(): number {
-  return speechRate;
-}
-
+// 刻意**没有**语速控制。曾经做过播放侧 WSOLA 时间伸缩（音高保持得很好），
+// 但 realtime 下加速必须垫住 T·(r−1)/r 的音频才不断续（1.15× 要 480ms），
+// 而上游恰好 1× 实时时加速一点时间都省不下来 —— 省的只是语速，换掉的是开口时机。
+// 用户试过之后判定延迟不可接受，功能整个移除。详见 git 历史。
 export type SpeechStreamEvents = {
   /** 0..1，驱动口型。flush 后立刻变 0。 */
   onLevel?: (level: number) => void;
@@ -75,30 +36,17 @@ export class SpeechStream {
   /** 每次 flush/stop 自增。迟到的 enqueue 用它丢弃。 */
   private epoch = 0;
   private disposed = false;
-  /** 播放语速。默认跟随模块级的全局值。 */
-  private rate: number;
   /**
    * 构造时显式指定了 rate —— 这个实例不跟随全局设置变更。
    * 给 chat 模式用（服务端已经调过速了，播放侧必须保持 1.0，否则倍率相乘）。
    */
-  readonly ratePinned: boolean;
 
-  constructor(
-    private readonly events: SpeechStreamEvents = {},
-    options: { rate?: number } = {},
-  ) {
-    this.ratePinned = options.rate !== undefined;
-    this.rate = clampSpeechRate(options.rate ?? speechRate);
-    live.add(this);
-  }
+  constructor(private readonly events: SpeechStreamEvents = {}) {}
 
   get audioLevel(): number {
     return this.level;
   }
 
-  get speechRate(): number {
-    return this.rate;
-  }
 
   get contextState(): AudioContextState | 'none' {
     return this.context?.state ?? 'none';
@@ -132,7 +80,7 @@ export class SpeechStream {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [1],
-      processorOptions: { sourceRate: REALTIME_SAMPLE_RATE, rate: this.rate },
+      processorOptions: { sourceRate: REALTIME_SAMPLE_RATE },
     });
     node.port.onmessage = (event) => {
       const data = event.data as { type: string; value?: number };
@@ -188,22 +136,7 @@ export class SpeechStream {
     return this.epoch;
   }
 
-  /**
-   * 改变播放语速（保持音高的时间伸缩倍率），夹在 0.8~1.8。
-   *
-   * 可以在说话中途改 —— worklet 不清缓冲，已经合成好的那几十毫秒照原速播完，
-   * 下一轮才换倍率，所以拖滑块时中间不会出现空洞或爆音。
-   * 倍率回到 1 时 worklet 走旁路，一个样本都不经过伸缩处理。
-   *
-   * 注意倍率 >1 时 worklet 会按倍率缩放预缓冲（realtime 模型按实时出音，不垫就
-   * 断续），所以**改成 >1 之后下一段话的首音会晚约半秒**。细节见
-   * public/audio-playback.js 顶部「变速路径的预缓冲与弹性倍率」。
-   */
-  setRate(rate: number): number {
-    this.rate = clampSpeechRate(rate);
-    this.node?.port.postMessage({ type: 'rate', value: this.rate });
-    return this.rate;
-  }
+
 
   /**
    * 临时压低音量，用于「可能被打断」的瞬间。
@@ -237,7 +170,6 @@ export class SpeechStream {
 
   async dispose(): Promise<void> {
     this.disposed = true;
-    live.delete(this);
     this.flush();
     if (this.node) this.node.port.onmessage = null;
     this.node?.disconnect();

@@ -1574,7 +1574,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'yuanqishaonv',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1596,7 +1595,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => voice,
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1618,7 +1616,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1640,7 +1637,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1667,7 +1663,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl,
     });
@@ -1685,7 +1680,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       onError: (message) => errors.push(message),
       fetchImpl: tts.fetchImpl,
@@ -1714,7 +1708,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       onError: (message) => errors.push(message),
       fetchImpl,
@@ -1734,7 +1727,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });
@@ -1750,7 +1742,6 @@ describe('SpeechSynthesizer：按句合成、排队播放、可取消', () => {
     const synth = new SpeechSynthesizer({
       getApiKey: async () => 'k',
       getVoice: () => 'v',
-      getSpeechRate: () => 1,
       sink,
       fetchImpl: tts.fetchImpl,
     });

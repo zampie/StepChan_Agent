@@ -700,7 +700,10 @@ describe('RealtimeSession：工具闭环与上限', () => {
     assert.equal(session.input_audio_format, 'pcm16');
     assert.equal(session.output_audio_format, 'pcm16');
     // 必须显式调参：文档默认 silence_duration_ms=100ms 会把一句话切成好几个回合，
-    // energy_awakeness_threshold=2500 在室内会被键盘和风扇唤起。
+    // 能量门限曾抬到 3400 挡噪声，但实测把低增益输入整个挡掉了
+    // （AirPods 自检峰值 0.001 → 永远跨不过去，表现为"说话毫无反应"）。
+    // 所以现在只要求"不高于文档默认值太多"：宁可偶尔多听一句也不要听不见，
+    // 噪声的代价已经很小了（可打断默认关闭，噪声砍不掉她说的话）。
     const vad = session.turn_detection as {
       type: string;
       silence_duration_ms: number;
@@ -712,8 +715,12 @@ describe('RealtimeSession：工具闭环与上限', () => {
       '停顿容忍不能用 100ms 的默认值，否则一句话会被切断',
     );
     assert.ok(
-      vad.energy_awakeness_threshold > 2500,
-      '能量门限必须高于默认值，否则环境噪声全进对话',
+      vad.energy_awakeness_threshold <= 2500,
+      '能量门限不能抬太高，否则低增益麦克风（如蓝牙耳机）会被整个挡掉，表现为"说话没反应"',
+    );
+    assert.ok(
+      vad.energy_awakeness_threshold > 0,
+      '仍要有门限，否则纯静音也会开回合',
     );
     const transcription = session.input_audio_transcription as Record<string, unknown>;
     assert.equal(transcription.model, 'stepaudio-3-asr-max');

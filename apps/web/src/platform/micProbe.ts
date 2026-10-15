@@ -22,7 +22,16 @@ export type MicProbeResult = {
 };
 
 /** 读一帧样本最多等多久。超时本身就是一个有意义的结论（设备在但不出数据）。 */
-const FRAME_TIMEOUT_MS = 2000;
+const FRAME_TIMEOUT_MS = 3000;
+
+/**
+ * 判定"采到人声"的峰值门限。
+ *
+ * 正常说话峰值在 0.05~0.5；安静房间的本底噪声约 0.001~0.005。
+ * 取 0.01 把两者分开。**这个数字很重要**：定得太低会把本底噪声报成成功，
+ * 用户看到一排 ✓ 却说话没反应，排查方向会被整个带偏（实际发生过）。
+ */
+const SPEECH_PEAK = 0.01;
 
 function describe(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -127,10 +136,17 @@ export async function probeMicrophone(): Promise<MicProbeResult> {
     }
     source.disconnect();
     analyser.disconnect();
+    // 门限按**语音电平**定，不是"有没有信号"。
+    // 原来用 0.0005，于是 0.001（本底噪声）也报成 ✓ —— 用户看到全绿却说话没反应，
+    // 这种"通过"比失败更有害，因为它把排查方向带偏了。
+    // 正常说话的峰值在 0.05~0.5；0.01 以下基本可以断定没采到人声。
     steps.push({
-      label: '采集到声音',
-      ok: peak > 0.0005,
-      detail: peak > 0.0005 ? `峰值 ${peak.toFixed(3)}` : '两秒内没有任何信号',
+      label: '采集到语音',
+      ok: peak >= SPEECH_PEAK,
+      detail:
+        peak >= SPEECH_PEAK
+          ? `峰值 ${peak.toFixed(3)}（正常）`
+          : `峰值 ${peak.toFixed(3)} —— 这是本底噪声的量级，没有采到人声`,
     });
   } catch (error) {
     steps.push({ label: '采集到声音', ok: false, detail: describe(error) });
@@ -139,14 +155,16 @@ export async function probeMicrophone(): Promise<MicProbeResult> {
     void context.close().catch(() => {});
   }
 
-  if (peak <= 0.0005) {
-    // 这条不算硬失败：用户可能就是没出声。但要把两种可能都说清楚。
+  if (peak < SPEECH_PEAK) {
     return {
-      ok: true,
+      ok: false,
       steps,
       advice:
-        '权限和设备都正常，但两秒内没采到声音。如果你刚才没说话那是正常的；如果说了话还是这样，检查 系统设置 → 声音 → 输入 的音量，或者换一个输入设备。',
+        `权限和设备都正常，但三秒内只采到 ${peak.toFixed(3)} 的信号（本底噪声量级），没有人声。` +
+        '请在点「检查麦克风」之后**立刻正常说话**再看结果。如果说了话还是这样：' +
+        '① 蓝牙耳机（AirPods 这类）常见输入增益极低或根本没切到麦克风，去 系统设置 → 声音 → 输入 看一眼选中的设备和输入电平；' +
+        '② 把输入音量拉高；③ 换成内置麦克风试一次，用来区分是设备问题还是应用问题。',
     };
   }
-  return { ok: true, steps, advice: '麦克风一切正常，可以直接跟她说话。' };
+  return { ok: true, steps, advice: '麦克风正常，采到了人声，可以直接跟她说话。' };
 }

@@ -120,38 +120,6 @@ export function SettingsView() {
         </label>
         {/* 模型首次出音后音色不可改，所以换音色要重建会话 —— 用户需要知道会断一下。 */}
         <p className="hint">换音色会重新建立一次语音连接，正在说的话会中断。</p>
-        <label className="row">
-          <span>语速</span>
-          <input
-            type="range"
-            min={0.8}
-            max={1.8}
-            step={0.05}
-            value={settings.speechRate}
-            onChange={(e) => void update({ speechRate: Number(e.target.value) })}
-          />
-          <span className="value">{settings.speechRate.toFixed(2)}×</span>
-        </label>
-        {/* 两个模式的实现完全不同，而且差异是用户能听出来的（一个免费、一个要
-            拿首音延迟换），所以这里必须讲清楚，不能只写一句"调语速"。 */}
-        <p className="hint">
-          默认 <strong>1.00 倍</strong>（模型原速）。两个模式调速的方式完全不一样：
-        </p>
-        <p className="hint">
-          <strong>聪明优先</strong>——服务端直接按这个倍率合成，拿到的声音本身就是
-          加速过的，所以<strong>没有任何代价</strong>，音质和延迟都不受影响（下一句生效）。
-        </p>
-        <p className="hint">
-          <strong>反应优先</strong>——服务端不支持调速，只能在播放时做保持音高的变速。
-          而这个模型是按<strong>实时速度</strong>出音的：要以 1.15 倍播，就得比声音到达
-          更快地消耗它，所以必须先攒一小段再开口。选 1.15 倍以上时，她
-          <strong>从说完到出声会从约 0.2 秒变成约 0.65 秒</strong>，而且很长的句子后半段
-          会慢慢回落到原速（这是为了不出现断续的卡顿）。立刻生效。
-        </p>
-        <p className="hint">
-          所以：想要低延迟就留在 1.00 倍；只是觉得她说得慢、不在乎多等半秒，再往上调。
-          1.4 倍以内音质基本听不出处理痕迹，1.6 倍以上可能听到轻微的沙沙感或接缝。
-        </p>
       </section>
 
       <section>
@@ -188,8 +156,12 @@ export function SettingsView() {
           麦克风出问题时的症状和「语音开关关着」「授权过期」「被别的应用占用」
           完全一样 —— 按住、说完、松手，什么都没发生。这个自检会把断在哪一步说清楚。
         </p>
+        <p className="hint">
+          <strong>点下面的按钮之后请立刻说话</strong> —— 自检要靠真实人声才能判断
+          采集链路通不通。不说话的话它只会采到本底噪声。
+        </p>
         <button type="button" onClick={() => void runMicProbe()} disabled={micRunning}>
-          {micRunning ? '检查中…' : '检查麦克风'}
+          {micRunning ? '请说话…' : '检查麦克风（点完就说话）'}
         </button>
         {mic && (
           <div className="probe">

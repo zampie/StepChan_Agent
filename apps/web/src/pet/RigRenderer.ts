@@ -940,11 +940,17 @@ export class RigRenderer {
     }
     slot.cur.texture = tex;
     slot.cur.position.set(overlay.x, overlay.y);
-    slot.cur.visible = true;
+    // **必须过 layersActive()，不能无条件 true。**
+    // 覆盖层的 x/y 是按 idle 画幅实测的，换姿势（sleep 侧躺、sit 坐下…）之后
+    // 那个坐标没有意义。playAction 会先 setLayersVisible(false) 把它们藏起来，
+    // 但紧接着设表情就会走到这里 —— 原来这一行无条件显示，于是眼睛又冒出来、
+    // 还贴在站立时的位置上。用户报的「去睡吧时眼睛贴图位置不对」就是这条。
+    slot.cur.visible = this.layersActive();
     slot.cur.alpha = instant ? 1 : 0;
     slot.fade = instant ? 1 : 0;
     slot.name = name;
     if (instant) slot.prev.visible = false;
+    if (!slot.cur.visible) slot.prev.visible = false;
   }
 
   private stepFades(dtMs: number) {

@@ -12,7 +12,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Awareness } from './awareness';
 import { createBrain, type PetBrain } from './brain/chat';
 import { TouchTalk } from './brain/touchTalk';
-import { setSpeechRate } from './voice/SpeechStream';
 import { RigRenderer } from './pet';
 import { desktop } from './platform/desktop';
 import { reportDiagnostic } from './platform/diagnostics';
@@ -65,10 +64,6 @@ export function App() {
   const applyAppearance = useCallback((value: Settings) => {
     rigRef.current?.setSize(Math.round(BASE_SIZE * value.petScale));
     rigRef.current?.setReduceMotion(value.reduceMotion);
-    // 语速是模块级的：这一下会立刻作用到正在说话的实例，也会让之后新建的
-    // SpeechStream（RealtimeSession / ChatBrain 各自 new 的）自动带上倍率，
-    // 所以那两条链路都不用改。
-    setSpeechRate(value.speechRate);
   }, []);
 
   // ---- 渲染器 ----
@@ -434,7 +429,20 @@ export function App() {
         // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
         rigRef.current?.reactToTap(lastHitPart.current);
         const line = touchTalk.current.narrate(lastHitPart.current, busyRef.current);
-        if (line) void brainRef.current?.sendText(line).catch(() => {});
+        if (line) {
+          const brain = brainRef.current;
+          if (!brain) {
+            // 原来这里是 .catch(() => {}) 把错误吞了，于是「点了表情变了但不说话」
+            // 完全查不出原因。任何让她开不了口的情况都要说出来。
+            setError('她还没准备好说话（大脑没启动）。');
+            window.setTimeout(() => setError(null), 4000);
+          } else {
+            void brain.sendText(line).catch((e: unknown) => {
+              setError(e instanceof Error ? e.message : '她这次没说出话来。');
+              window.setTimeout(() => setError(null), 5000);
+            });
+          }
+        }
       }
     }
   }, []);
