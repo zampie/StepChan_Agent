@@ -1174,6 +1174,14 @@ describe('ChatSession：一轮对话跑完', () => {
 
     const partials = h.events.filter((e) => e.type === 'pet_transcript' && !e.final);
     assert.ok(partials.length >= 2, '应该有增量字幕');
+    // turn_start 必须先于本轮字幕：UI 靠它收掉上一句，晚到就会把新字幕清掉
+    // （症状是「只有语音，没有气泡」）。两种大脑都要守这个约定。
+    const types = h.events.map((e) => e.type);
+    assert.ok(
+      types.indexOf('turn_start') >= 0 &&
+        types.indexOf('turn_start') < types.indexOf('pet_transcript'),
+      'chat 模式也必须先发 turn_start',
+    );
     const final = h.events.find((e) => e.type === 'pet_transcript' && e.final);
     assert.equal(
       final?.type === 'pet_transcript' ? final.text : '',

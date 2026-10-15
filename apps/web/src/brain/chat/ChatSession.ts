@@ -126,6 +126,7 @@ export class ChatSession {
     this.sentences.reset();
     this.toolCallsThisTurn = 0;
     this.toolResults.clear();
+    this.options.emit({ type: 'turn_start' });
     this.options.emit({ type: 'activity', value: 'thinking' });
 
     // 跨 round 累计：UI 的气泡要显示整轮回复，不是单次模型调用的片段。

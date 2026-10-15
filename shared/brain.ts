@@ -172,6 +172,18 @@ export type PetEvent =
   | { type: 'user_transcript'; text: string; final: boolean }
   // 她说话的实时字幕。
   | { type: 'pet_transcript'; text: string; final: boolean }
+  /**
+   * 新的一轮回复开始了（服务端开始生成）。UI 据此收掉上一轮的气泡。
+   *
+   * 为什么需要一个显式信号：UI 原来靠「活动状态跨进忙」这个边沿去推断回合
+   * 开始，而**同一次交互里可能有第二个 response**（工具回调之后那一次、
+   * 被打断后重开的那一次、服务端 VAD 自己开的那一次），它不经过 thinking。
+   * 于是字幕先到、边沿后到 —— UI 把刚到的新字幕当成上一句清掉了，
+   * 用户看到的是「只有语音，没有气泡」。
+   *
+   * 回合边界只有会话层知道，不该让 UI 去猜。
+   */
+  | { type: 'turn_start' }
   | { type: 'thinking'; text: string }
   | { type: 'tool_start'; name: ToolName; args: unknown }
   | { type: 'tool_end'; name: ToolName; result: ToolResult }

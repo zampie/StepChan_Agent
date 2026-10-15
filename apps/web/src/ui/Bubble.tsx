@@ -19,6 +19,13 @@ type Props = {
    */
   petText: string;
   /**
+   * 她睡着了 → **对话气泡全部不显示**。
+   *
+   * 系统级的提示/报错/链接仍然显示：那些是「出了什么事」而不是聊天内容，
+   * 睡着时把连接断了这种事藏起来只会让人更困惑。
+   */
+  sleeping?: boolean;
+  /**
    * 她的音频是否还在播。
    *
    * 气泡的停留**不能**只看文字：`response.audio_transcript.done`（文字完成）
@@ -50,6 +57,7 @@ export function Bubble({
   link,
   onOpenLink,
   error,
+  sleeping = false,
 }: Props) {
   const [lingering, setLingering] = useState(false);
   const timer = useRef<number>(0);
@@ -71,8 +79,14 @@ export function Bubble({
     return () => clearTimeout(timer.current);
   }, [petText, speaking]);
 
-  const showPet = !!petText && (speaking || lingering);
-  if (!showPet && !userText && !thinking && !notice && !link && !error) return null;
+  // 睡着时对话气泡一律不显示。除了「她在睡觉就该安静」这一条，还有一个实际
+  // 原因：App 在入睡时会清掉在途文本，但清空是异步生效的，而迟到的字幕事件
+  // （入睡那一刻服务端还在发的那几条）仍可能把文本填回来 —— 在这里一并挡掉，
+  // 比在 App 里追着每条事件判断可靠。
+  const showPet = !sleeping && !!petText && (speaking || lingering);
+  const showUser = !sleeping && !!userText;
+  const showThinking = !sleeping && thinking && !petText;
+  if (!showPet && !showUser && !showThinking && !notice && !link && !error) return null;
 
   return (
     // pointer-events: none 由 CSS 保证；只有链接按钮单独打开点击。
@@ -84,8 +98,8 @@ export function Bubble({
           {notice}
         </div>
       )}
-      {userText && <div className="bubble bubble-user">{userText}</div>}
-      {thinking && !petText && (
+      {showUser && <div className="bubble bubble-user">{userText}</div>}
+      {showThinking && (
         <div className="bubble bubble-thinking" aria-label="正在思考">
           <i />
           <i />

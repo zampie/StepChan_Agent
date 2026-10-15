@@ -2434,3 +2434,66 @@ describe('回归：持续聆听下的长按（此前是死代码，现在默认�
     );
   });
 });
+
+describe('回归：turn_start —— 回合边界必须由会话层告诉 UI，不能让它猜', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  // 症状：「有的时候只有语音，不显示聊天气泡」。
+  //
+  // UI 原来靠「活动状态跨进忙」这个边沿推断「新回合开始了，把上一句收掉」。
+  // 但同一次交互里可能有**第二个 response**（工具回调之后那次、服务端 VAD
+  // 自己开的那次），它不经过 thinking —— 于是本轮字幕先到、边沿后到，
+  // UI 把刚到的新字幕当成上一句清掉了。
+
+  /** 事件类型序列，用来断言顺序。 */
+  const typesOf = (events: PetEvent[]) => events.map((e) => e.type);
+
+  test('turn_start 先于本轮任何字幕', () => {
+    const { ws, events } = makeSession();
+    events.length = 0;
+    ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    ws.deliver({ type: 'response.audio_transcript.delta', delta: '我' });
+
+    const types = typesOf(events);
+    const start = types.indexOf('turn_start');
+    const first = types.indexOf('pet_transcript');
+    assert.ok(start >= 0, '必须发 turn_start');
+    assert.ok(first >= 0, '前提：有字幕');
+    assert.ok(start < first, 'turn_start 必须先到，否则 UI 会把新字幕当旧话清掉');
+  });
+
+  test('同一次交互里的第二个 response 也要发（工具回调之后那一次）', () => {
+    const { ws, events } = makeSession();
+    // 第一轮：她说「我看一下」。
+    ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    ws.deliver({ type: 'response.audio_transcript.delta', delta: '我看一下' });
+    ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    events.length = 0;
+
+    // 工具跑完，服务端开第二轮说真正的答案 —— **不经过 thinking**。
+    ws.deliver({ type: 'response.created', response: { id: 'r2' } });
+    ws.deliver({ type: 'response.audio_transcript.delta', delta: '现在八点半' });
+
+    const types = typesOf(events);
+    assert.ok(
+      types.indexOf('turn_start') >= 0 &&
+        types.indexOf('turn_start') < types.indexOf('pet_transcript'),
+      '第二个 response 同样要先发 turn_start —— 这一轮没有 thinking 可供 UI 推断',
+    );
+    assert.equal(
+      types.filter((t) => t === 'activity').length,
+      0,
+      '前提：这一轮确实没有活动状态变化（所以边沿推断必然失效）',
+    );
+  });
+
+  test('被打断后重开的那一轮也要发', () => {
+    const { session, ws, events } = makeSession();
+    ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    session.interrupt();
+    events.length = 0;
+    ws.deliver({ type: 'response.created', response: { id: 'r2' } });
+    assert.ok(typesOf(events).includes('turn_start'));
+  });
+});

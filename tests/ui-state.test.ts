@@ -6,13 +6,15 @@
 // 这里每条测试对应一个**真的发生过**的无声失败：门控条件写反、分支漏一个 case、
 // 新设置项忘了接线。症状一律是「开关点了没反应」「按住说完松手什么都没发生」，
 // 界面上看不出哪儿断了，只能靠人肉发现 —— 所以宁可测得啰嗦。
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   connectionFeedback,
   escapeAction,
+  intentDisposition,
   longPressPlan,
   sessionSyncFor,
+  shouldListenAfterWake,
 } from '../apps/web/src/ui/uiState';
 import { defaultSettings, settingsSchema, type Settings } from '../shared/desktop';
 
@@ -207,4 +209,41 @@ test('我们自己关的连接不报错，带原因的才报', () => {
 test('connecting 不提示（首次连接由别的界面状态表达）', () => {
   assert.deepEqual(connectionFeedback('connecting'), { kind: 'ignore' });
   assert.deepEqual(connectionFeedback('connecting', '随便什么'), { kind: 'ignore' });
+});
+
+// ---------------------------------------------------------------- 睡眠
+
+describe('睡眠：不聆听、不显示气泡，谁能出声要分来源', () => {
+  test('自动打盹进睡眠，但不说台词', () => {
+    // 睡着时气泡是隐藏的，这时念一句「困了先睡会儿」用户只会听到一个
+    // 没有出处的声音 —— 正是报过的「只有语音没有气泡」。
+    assert.equal(intentDisposition('nap', false), 'sleep');
+    assert.notEqual(intentDisposition('nap', false), 'speak', '入睡不该说台词');
+  });
+
+  test('用户的真实动作（唤醒、往她身上拖文件）要叫醒她并回应', () => {
+    assert.equal(intentDisposition('wake', true), 'wake-and-speak');
+    assert.equal(intentDisposition('drop', true), 'wake-and-speak');
+  });
+
+  test('环境类搭话睡着时咽回去，醒着才说', () => {
+    assert.equal(intentDisposition('frontmost', true), 'ignore', '睡着时她不该自己搭话');
+    assert.equal(intentDisposition('frontmost', false), 'speak');
+  });
+
+  test('醒来按当前设置恢复聆听，而不是睡前快照', () => {
+    // 她睡着那段时间里用户可能去设置里关了语音；按快照恢复等于把用户
+    // 刚关掉的麦克风又打开。
+    assert.equal(shouldListenAfterWake({ voiceEnabled: true, listening: true }), true);
+    assert.equal(
+      shouldListenAfterWake({ voiceEnabled: false, listening: true }),
+      false,
+      '语音整个关着就不该恢复麦克风',
+    );
+    assert.equal(
+      shouldListenAfterWake({ voiceEnabled: true, listening: false }),
+      false,
+      '按住说话模式不常开麦，醒来也不该开',
+    );
+  });
 });

@@ -20,8 +20,10 @@ import { popupPetMenu } from './ui/PetMenu';
 import {
   connectionFeedback,
   escapeAction,
+  intentDisposition,
   longPressPlan,
   sessionSyncFor,
+  shouldListenAfterWake,
 } from './ui/uiState';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
 import type { ActionName, Expression, FxName } from '../../../shared/pet';
@@ -30,6 +32,14 @@ import type { PetEvent } from '../../../shared/brain';
 const RIG_URL = `${import.meta.env.BASE_URL}rig/rig.json`;
 /** petScale = 1 时角色的显示高度（px）。 */
 const BASE_SIZE = 300;
+/**
+ * 用户说完之后自己那条气泡的兜底停留时长。
+ *
+ * 正常由 turn_start 收掉（她一开口就让位），这个值只在「她没有回应」时起作用。
+ * 取 6 秒：够看清自己被听成了什么（ASR 听错时这是唯一的线索），
+ * 又不会在没人理的时候一直挂着。
+ */
+const USER_TEXT_LINGER_MS = 6000;
 
 export function App() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -57,6 +67,14 @@ export function App() {
   /** 素材致命错误，单独存，不被临时错误覆盖。 */
   const [rigError, setRigError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
+  /**
+   * 她睡着了。
+   *
+   * 原来这个状态只存在渲染器里（rigRef.current.sleeping），于是气泡层压根看不到它。
+   * 现在抬到 React state：睡着时要**不聆听、不显示气泡**，这两件事都在这一层。
+   */
+  const [sleeping, setSleeping] = useState(false);
+  const sleepingRef = useRef(false);
   const [draft, setDraft] = useState('');
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   /**
@@ -78,6 +96,8 @@ export function App() {
   // （看起来就是「提示一闪就没了」）。卸载时也没人清，React 会抱怨更新已卸载组件。
   const noticeTimer = useRef(0);
   const errorTimer = useRef(0);
+  /** 用户气泡的保险超时。见 armUserTextExpiry。 */
+  const userTextTimer = useRef(0);
   const showNotice = useCallback((text: string, ms = 4000) => {
     window.clearTimeout(noticeTimer.current);
     setNotice(text);
@@ -89,10 +109,73 @@ export function App() {
     // ms = 0 表示不自动消失 —— 启动失败这类「她根本动不了」的问题不该自己溜走。
     if (ms > 0) errorTimer.current = window.setTimeout(() => setError(null), ms);
   }, []);
+  const clearUserTextExpiry = useCallback(() => {
+    window.clearTimeout(userTextTimer.current);
+    userTextTimer.current = 0;
+  }, []);
+
+  /**
+   * 转写定稿之后，用户自己的那条气泡最多留多久。
+   *
+   * 正常情况下它由 turn_start 收掉（她一开口就让位）。但**她不一定会回应** ——
+   * 环境噪声被转写成一句话、或者这一轮在服务端丢了，都不会有 turn_start。
+   * 没有这个兜底的话气泡就永久留在屏幕上，正好是刚修掉的那个 bug
+   * （清空路径只剩一条，一旦那条不走就再也清不掉）。
+   */
+  const armUserTextExpiry = useCallback(
+    (text: string) => {
+      clearUserTextExpiry();
+      if (!text) return;
+      userTextTimer.current = window.setTimeout(() => setUserText(''), USER_TEXT_LINGER_MS);
+    },
+    [clearUserTextExpiry],
+  );
+
+  /**
+   * 进入/退出睡眠的**唯一**入口。
+   *
+   * 原来四处（自动打盹、点击唤醒、右键菜单、awareness 的 wake 意图）各自
+   * 直接调 `rig.setSleeping()`，而睡眠要同时管三件事：动画、麦克风、气泡。
+   * 散着写必然漏 —— 这正是这个仓库反复踩的那类坑（同一个事实有多个写入点）。
+   *
+   * 睡着时：
+   * - **不聆听**。disableMic() 而不是改 listening 设置 —— 睡觉是临时状态，
+   *   不该把用户的开关给改了，醒来要原样恢复。
+   * - **不显示气泡**，并且把在途文本清掉（否则醒来会弹出一条睡前的残留）。
+   * - 正在说的话掐掉：手动「去睡吧」可能发生在她说话中间。
+   */
+  const applySleep = useCallback(
+    (next: boolean) => {
+      if (sleepingRef.current === next) return;
+      sleepingRef.current = next;
+      setSleeping(next);
+      rigRef.current?.setSleeping(next);
+      const brain = brainRef.current;
+      if (next) {
+        setPetText('');
+        setUserText('');
+        setThinking(false);
+        clearUserTextExpiry();
+        brain?.interrupt();
+        brain?.disableMic();
+        return;
+      }
+      // 醒来：按用户**当前的设置**恢复聆听，而不是记一份睡前快照 ——
+      // 她睡着这段时间里用户完全可能去设置里改了语音开关。
+      if (brain && shouldListenAfterWake(syncedRef.current)) {
+        void brain.enableMic().catch(() => {
+          // 麦克风恢复失败有自己的报错路径（onError），这里不重复弹。
+        });
+      }
+    },
+    [clearUserTextExpiry],
+  );
+
   useEffect(
     () => () => {
       window.clearTimeout(noticeTimer.current);
       window.clearTimeout(errorTimer.current);
+      window.clearTimeout(userTextTimer.current);
     },
     [],
   );
@@ -193,7 +276,12 @@ export function App() {
           setThinking(false);
           break;
         case 'user_transcript':
-          setUserText(event.final ? '' : event.text);
+          // final 时**不要立刻清空**。原来写的是 `event.final ? '' : event.text`，
+          // 而短句子（「嗯」「好」「停」）常常只来一条 completed、没有中间 delta ——
+          // 于是唯一一次赋值就是清空，用户说完话自己的气泡压根没出现过。
+          // 现在留着，由两件事收掉它：她开始回应（turn_start），或者保险超时。
+          setUserText(event.text);
+          if (event.final) armUserTextExpiry(event.text);
           // 刻意**不**在这里清掉她的气泡。原来是「有任何转写就清」，于是环境噪声
           // 产生的半个字也能把她刚说的话瞬间抹掉。她的气泡由下一次回复覆盖，
           // 或者停止出声后自然消失 —— 看不完的回复是真 bug，气泡不及时让位只是观感。
@@ -202,21 +290,27 @@ export function App() {
           setThinking(true);
           rig?.setExpression('curious');
           break;
-        case 'activity':
-          // 新回合开始（从「不忙」跨到「忙」）时把上一句清掉。
+        case 'turn_start':
+          // 新一轮回复开始 → 收掉上一轮的两个气泡。
           //
-          // 不清的话：上一句 linger 到期后 petText 还留在 state 里，新回合把
-          // speaking 翻 true，Bubble 的 effect 重跑又把**上一句**显示出来，
-          // 一直挂到第一条新字幕盖掉它 —— 音频先于字幕时能闪好几百毫秒，
-          // 用户看到的是「她说完的话又莫名闪一下」。
-          // 刻意只在这个边沿清，**不**在 user_transcript 里清她的气泡：
-          // 那是之前修过的另一个 bug（噪声蹦半个字就把她的话抹掉，回复一闪而过）。
-          if (isBusyActivity(event.value) && !busyRef.current) setPetText('');
+          // 这件事原来是 UI 自己按「活动状态跨进忙」的边沿推断的，而**同一次
+          // 交互里可能有第二个 response**（工具回调之后那次、VAD 吞掉语音事件
+          // 那次），它不经过 thinking —— 于是字幕先到、边沿后到，UI 把刚到的
+          // 新字幕当成上一句清掉了。症状是「只有语音，没有气泡」。
+          // 回合边界只有会话层知道，所以改成由它显式通知（见 shared/brain.ts）。
+          setPetText('');
+          setUserText('');
+          clearUserTextExpiry();
+          break;
+        case 'activity':
           setThinking(event.value === 'thinking');
           setSpeaking(event.value === 'speaking');
           // 语义见 isBusyActivity 的注释（这个判断错过一次，所以有测试钉住）。
           busyRef.current = isBusyActivity(event.value);
-          if (event.value === 'idle') setUserText('');
+          if (event.value === 'idle') {
+            setUserText('');
+            clearUserTextExpiry();
+          }
           break;
         case 'privacy_notice':
           // 隐私动作必须可见 —— 这条提示不是装饰，是 AGENTS.md 的要求。
@@ -286,17 +380,27 @@ export function App() {
     const awareness = new Awareness({
       desktop,
       probe: {
-        busy: () => busyRef.current,
+        // 睡着也算「忙」：空闲行为和前台反应都查这个探针，睡觉时不该生成意图
+        // （白跑一次模型调用，而且结果会被 onIntent 丢掉）。
+        // 不会因此卡住唤醒 —— wake 意图是 notifyInteraction() 直接产出的，不过这道闸。
+        busy: () => busyRef.current || sleepingRef.current,
         userTyping: () => typingRef.current,
         visible: () => document.visibilityState === 'visible',
       },
       onIntent: (intent) => {
-        // 背后发生过隐私读取的意图，必须先冒提示再说话。
-        if (intent.privacy) showNotice(noticeText(intent.privacy, ''), 4000);
         // 睡觉是**状态**不是一次性动作：只 playAction('sleep') 的话闲置摇摆和
         // 动作自动回位会把她顶起来，而且醒不过来（wake 得有对应的出口）。
-        if (intent.kind === 'nap') rigRef.current?.setSleeping(true);
-        if (intent.kind === 'wake') rigRef.current?.setSleeping(false);
+        // 状态转换统一走 applySleep —— 它同时管动画、麦克风和气泡。
+        // 睡着时谁能出声，判断在 intentDisposition（有测试钉住）。
+        const disposition = intentDisposition(intent.kind, sleepingRef.current);
+        if (disposition === 'ignore') return;
+        if (disposition === 'sleep') {
+          applySleep(true);
+          return; // 刻意不说台词，见 intentDisposition 的注释
+        }
+        if (disposition === 'wake-and-speak') applySleep(false);
+        // 背后发生过隐私读取的意图，必须先冒提示再说话。
+        if (intent.privacy) showNotice(noticeText(intent.privacy, ''), 4000);
         // 原来这里是 `.catch(() => {})`，于是主动搭话、拖放反应、空闲行为的失败
         // 全都无声无息。统一走 speak()，和被摸开口那条路一个处理方式。
         speak(intent.prompt);
@@ -308,7 +412,7 @@ export function App() {
       awarenessRef.current = null;
       awareness.stop();
     };
-  }, [showNotice, speak]);
+  }, [showNotice, speak, applySleep]);
 
   /**
    * 把一份新设置应用到界面**和正在进行的会话**上。设置的三条写入路径全部汇到这里。
@@ -543,7 +647,7 @@ export function App() {
       awarenessRef.current?.notifyInteraction();
       // 点一下就该醒。awareness 的 wake 意图会走模型（要等回复），
       // 但视觉上必须立刻醒，否则点了还躺着像卡住。
-      rigRef.current?.setSleeping(false);
+      applySleep(false);
       // 双击的第二下不再换表情（见 TAP_DEDUPE_MS）。
       if (!isSecondOfDouble) {
         // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
@@ -559,6 +663,13 @@ export function App() {
   const beginGesture = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
+      // 手指一按下就先叫醒她。
+      //
+      // 必须在这里而不是只在 pointerup 的点击分支里：睡着时麦克风是关的，
+      // 而长按走的是 beginPushToTalk() —— 持续聆听模式下它只把活动状态切成
+      // 「在听」就返回（麦克风本来该是开着的）。不先唤醒的话用户按住、说完、
+      // 松手，界面显示在听、实际一个字都没收，又是一次无声失败。
+      applySleep(false);
       // 长按要不要启动，判断在 longPressPlan（有测试钉住）。
       //
       // 这里**刻意不再看聆听模式**。原来是 `brain !== null && !brain.listening`，
@@ -595,7 +706,7 @@ export function App() {
           : 0;
       gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer };
     },
-    [settings.voiceEnabled, showNotice, showError],
+    [settings.voiceEnabled, showNotice, showError, applySleep],
   );
 
   const moveGesture = useCallback((e: React.PointerEvent) => {
@@ -637,7 +748,7 @@ export function App() {
             onType: openComposer,
             onPatchSettings: applySettingsPatch,
             onToggleSleep: (next) => {
-              rigRef.current?.setSleeping(next);
+              applySleep(next);
               // 主动叫醒也算一次互动，否则空闲计时还在跑、马上又会自己睡回去。
               if (!next) awarenessRef.current?.notifyInteraction();
             },
@@ -648,7 +759,7 @@ export function App() {
               void desktop.moveToSpot('bottom_right').catch(() => {});
             },
             onQuit: () => void desktop.quit().catch(() => {}),
-          }, rigRef.current?.sleeping ?? false).then((shown) => {
+          }, sleeping).then((shown) => {
             // 原生菜单起不来时退回直接开输入框，不要让右键变成「什么都没发生」。
             if (!shown) openComposer();
           });
@@ -668,6 +779,7 @@ export function App() {
         speaking={speaking}
         userText={userText}
         thinking={thinking}
+        sleeping={sleeping}
         notice={notice}
         link={link}
         error={rigError ?? error}

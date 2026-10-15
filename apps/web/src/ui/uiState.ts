@@ -137,3 +137,45 @@ export function connectionFeedback(
   if (state === 'closed') return detail ? { kind: 'error', text: detail } : { kind: 'ignore' };
   return { kind: 'ignore' };
 }
+
+// ---- 睡眠 ----
+
+/**
+ * 她睡着时，一个 awareness 意图该怎么处理。
+ *
+ * - `sleep`           进入睡眠，**不说话**
+ * - `wake-and-speak`  先叫醒她，再开口
+ * - `speak`           照常开口
+ * - `ignore`          什么都不做
+ */
+export type IntentDisposition = 'sleep' | 'wake-and-speak' | 'speak' | 'ignore';
+
+/**
+ * 睡眠期间谁能出声。
+ *
+ * 睡着意味着**不聆听、不显示气泡**，所以这时出声就是「只有语音没有气泡」——
+ * 用户报过这个症状，不能再自己造一个。于是按意图的来源分：
+ *
+ * - `nap`（自动打盹）进睡眠但**不说台词**。对着隐藏的气泡念「困了先睡会儿」
+ *   只剩一个没有出处的声音；而且自动打盹的前提就是人已经离开，说给谁听。
+ * - `wake` / `drop` 是用户的真实动作（互动、往她身上拖文件），该叫醒她并回应。
+ * - `frontmost` 这类环境搭话是她自己起意的，睡着时一律咽回去。
+ */
+export function intentDisposition(
+  kind: 'frontmost' | 'drop' | 'nap' | 'wake',
+  sleeping: boolean,
+): IntentDisposition {
+  if (kind === 'nap') return 'sleep';
+  if (kind === 'wake' || kind === 'drop') return 'wake-and-speak';
+  return sleeping ? 'ignore' : 'speak';
+}
+
+/**
+ * 醒来之后要不要恢复聆听。
+ *
+ * 读**当前**设置，不是睡前快照：她睡着那段时间里用户完全可能去设置里关掉语音，
+ * 按快照恢复会把麦克风重新打开 —— 用户刚关的东西自己又回来了。
+ */
+export function shouldListenAfterWake(settings: Pick<Settings, 'voiceEnabled' | 'listening'>): boolean {
+  return settings.voiceEnabled && settings.listening;
+}

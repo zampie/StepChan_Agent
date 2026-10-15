@@ -1100,6 +1100,9 @@ export class RealtimeSession {
 
       case 'response.created': {
         reportDiagnostic('turn: 服务端开始生成回复');
+        // 告诉 UI「上一句可以收了」。必须在这里发而不是让 UI 自己猜：
+        // 这是唯一一个「新回合开始」一定先于本轮任何字幕的时刻。
+        this.options.emit({ type: 'turn_start' });
         this.firstDeltaLogged = false;
         this.responseActive = true;
         this.activeResponseId =
