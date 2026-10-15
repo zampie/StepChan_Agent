@@ -181,6 +181,16 @@ export const serverEventSchema = z.discriminatedUnion('type', [
     item_id: z.string().optional(),
     transcript: z.string().optional(),
   }),
+  // ASR 失败。**没有实测到服务端真的发它**，之所以要定义：不定义就会被降级成
+  // 'unknown' 然后 console.debug 掉，而它恰好是「用户气泡永久卡住」的一条路径
+  // （delta 已经把半句话推到屏幕上，唯一的清空信号是 completed，不来就清不掉），
+  // 排查时连一条线索都没有。定义它的成本是三行，漏掉的成本是一个无法复现的 bug。
+  z.object({
+    ...withId,
+    type: z.literal('conversation.item.input_audio_transcription.failed'),
+    item_id: z.string().optional(),
+    error: z.looseObject({ message: z.string().optional() }).optional(),
+  }),
   z.object({ ...withId, type: z.literal('response.created'), response: z.looseObject({}) }),
   z.object({
     ...withId,

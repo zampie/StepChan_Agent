@@ -7,7 +7,16 @@
 import { useEffect, useRef, useState } from 'react';
 
 type Props = {
-  /** 她正在说的话（流式）。 */
+  /**
+   * 她正在说的话（流式）。
+   *
+   * 约定：**新回合开始时调用方要把它清成 ''**（App.tsx 在 activity 跨进「忙」
+   * 的那一刻清）。不清的话下面的 effect 会在 speaking 翻 true 时把**上一句**
+   * 重新显示出来 —— 上一句 linger 到期只是把 lingering 置 false，petText 还在，
+   * 于是新回合一开始旧话又冒出来，一直挂到第一条新字幕盖掉它（音频先于字幕时
+   * 能闪好几百毫秒，用户看到的是「说完的话又莫名闪一下」）。
+   * 这个复活逻辑不在这里拦，是因为「同一句话连说两遍」也要能正常显示。
+   */
   petText: string;
   /**
    * 她的音频是否还在播。

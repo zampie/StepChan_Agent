@@ -31,6 +31,28 @@ const ROTATE_MARGIN_MS = 90_000;
 /** 文字输入后，等多久判定「她答应了却没真的调工具」。 */
 const TOOL_NUDGE_DELAY_MS = 1200;
 /**
+ * 「在想」最多允许停留多久（且期间既没有在生成、也没有工具在跑）。
+ *
+ * 超了就判定这一轮丢了：报错并复位。为什么需要它 —— 进入 thinking 的出口只有
+ * `response.done`，而有几条路进得去出不来（发送失败、服务端判噪声不开回合、
+ * response.cancelled）。卡在 thinking 的表现是永久三点气泡 + 点她不说话 +
+ * 主动感知整层静默，而且**不报任何错**。
+ *
+ * 10 秒：比正常的首字延迟（实测 1~2 秒）宽松一个数量级，又不至于让用户
+ * 盯着三点气泡等到放弃。
+ */
+const THINKING_TIMEOUT_MS = 10_000;
+/**
+ * 打断后的「丢弃在途音频」闸门最多开多久。
+ *
+ * 正常情况它由下一个 `response.created` 解除。但那条事件不是一定会来
+ * （`response.create` 可能发失败，或者服务端因 VAD 自己开的回合先送音频再送
+ * created），而闸门开着期间**所有音频增量都被整段丢弃** —— 用户听到的是
+ * 「她这一次完全不说话」，而且不报错。实测在途增量只有 4 条，1.5 秒是个
+ * 宽松到不可能误伤、又不会让她静音太久的上界。
+ */
+const SUPPRESS_MAX_MS = 1500;
+/**
  * 一次长按至少要采到这么多帧（一帧约 40ms，见 MicStream 的 frameSamples）才算
  * 「说了话」。
  *
@@ -99,6 +121,11 @@ export class RealtimeSession {
   private toolResults = new Map<string, ToolResult>();
   private inFlightTools = new Set<string>();
   private responseActive = false;
+  /**
+   * 当前这一轮的 response id。用来丢掉上一轮迟到的 `response.done`。
+   * 服务端 VAD 会在一轮还没收尾时自己开下一轮，两轮的事件真的会交错（已实测）。
+   */
+  private activeResponseId: string | null = null;
   private hadAudioOutput = false;
   private awaitingToolFor: ToolName | null = null;
   /**
@@ -112,6 +139,8 @@ export class RealtimeSession {
   /** 已压音量、等待确认是不是真人声的状态。 */
   private pendingBargeIn = false;
   private bargeInTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 丢弃闸门的硬上界定时器。见 SUPPRESS_MAX_MS。 */
+  private suppressTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * 本次 VAD 回合被「不可打断」规则忽略了。
    *
@@ -120,6 +149,24 @@ export class RealtimeSession {
    * 这种半截状态（她明明还在说话，UI 却显示在思考）。
    */
   private vadIgnored = false;
+  /**
+   * 「不可打断」期间暂停上传麦克风音频。
+   *
+   * 为什么光在客户端忽略 VAD 不够：服务端 VAD 是开着的（她不说话时还要靠它开
+   * 新回合），我们忽略 `speech_started` 只是不动本地播放 —— 可服务端那边音频
+   * 还在往 buffer 里堆，静音 700ms 后它会**自己 commit、自己开新回合**，
+   * 在服务端把她说到一半的回复截断。客户端对此零控制力（协议的
+   * `turn_detection` 没有「要断句但不要自动开回合」的字段，见 shared/realtime.ts）。
+   *
+   * 所以唯一可行的办法是：她说话期间干脆不给服务端音频 —— 停止 append 并
+   * 清掉已经堆进去的。没有音频就没有回合，她才真的不会被打断。
+   *
+   * 代价说清楚：这段时间用户说的话是**真的被丢掉**了，不是排队等她说完。
+   * 这正是「不可打断」的语义 —— 想插话就长按她（走 interrupt()，不受开关影响）。
+   * 长按是**可靠**的那个手段；Esc 只在应用是当前窗口时收得到，而 Accessory
+   * 激活策略下桌宠窗平时不抢键盘焦点，所以别把 Esc 当主要出路写给用户。
+   */
+  private micHeld = false;
   /** 按住说话进行中。 */
   private pttActive = false;
   /** 本次长按已经送出去多少帧音频。见 MIN_PUSH_TO_TALK_FRAMES。 */
@@ -130,6 +177,8 @@ export class RealtimeSession {
   private firstDeltaLogged = false;
   private suppressLogged = false;
   private lastActivity: 'idle' | 'listening' | 'thinking' | 'speaking' = 'idle';
+  /** 进入 thinking 的时刻。看门狗用它判断「在想」是不是已经想死了。 */
+  private thinkingSince = 0;
   private activityWatchdog: ReturnType<typeof setInterval> | null = null;
   private userPartial = '';
   private petPartial = '';
@@ -144,6 +193,9 @@ export class RealtimeSession {
     });
     this.mic = new MicStream({
       onFrame: (base64) => {
+        // 「不可打断」期间不给服务端音频 —— 否则它会自己 commit 并开新回合，
+        // 在服务端截断她。见 micHeld 的注释。
+        if (this.micHeld) return;
         if (this.pttActive) this.pttFrames++;
         this.send({ type: 'input_audio_buffer.append', audio: base64 });
       },
@@ -176,9 +228,20 @@ export class RealtimeSession {
     return this.pttActive;
   }
 
-  /** 她此刻正在出声（还有未播完的音频，或者这一轮还没结束）。 */
+  /**
+   * 她此刻正在出声（还有未播完的音频，或者这一轮还没结束）。
+   *
+   * 两个分量各自都会在她真的还在说话时为假，所以必须是或：
+   * - `responseActive` 在 `response.done` 就清零，而环里还压着几百毫秒到几秒的
+   *   尾音（模型出音快于播放）。
+   * - 播放侧的 `speaking` 是**去抖后**的，不是瞬时音量。原来这里用的是
+   *   `speech.audioLevel > 0`，而欠载/句间停顿都会让它瞬时归零 ——
+   *   于是「可打断」关着时 `!interruptible && speaking` 在那一瞬不成立，
+   *   speech_started 落到 beginBargeIn()，而它开头就是「她没在说话 → 直接
+   *   不可逆打断」。用户报的「关了开关还是被打断」有一半是这么来的。
+   */
   private get speaking(): boolean {
-    return this.responseActive || this.speech.audioLevel > 0;
+    return this.responseActive || this.speech.speaking;
   }
 
   /**
@@ -196,12 +259,39 @@ export class RealtimeSession {
    */
   private resolveIdleActivity(): void {
     if (this.speaking) return;
+    // 她说完了 → 恢复音频上行（「不可打断」期间是停掉的）。
+    this.releaseMicUpload();
     this.setActivity(this.micWanted ? 'listening' : 'idle');
   }
 
+  /** 她说话期间掐断音频上行，让服务端无话可提交。见 micHeld 的注释。 */
+  private holdMicUpload(): void {
+    if (this.micHeld) return;
+    this.micHeld = true;
+    // 清掉她开始说话到现在已经堆进服务端 buffer 的那一段，否则这段就够它开一个回合。
+    this.send({ type: 'input_audio_buffer.clear' });
+    reportDiagnostic('vad: 不可打断 —— 已暂停音频上行并清空服务端缓冲');
+  }
+
+  private releaseMicUpload(): void {
+    if (!this.micHeld) return;
+    this.micHeld = false;
+    // 恢复前再清一次：停传期间服务端可能还收到了在途的几帧。
+    this.send({ type: 'input_audio_buffer.clear' });
+    reportDiagnostic('vad: 已恢复音频上行');
+  }
+
   /**
-   * 看门狗：卡在 speaking 是静默故障，用户只会看到「她不理我了」。
+   * 看门狗：卡住是静默故障，用户只会看到「她不理我了」。
    * 代价是一个 500ms 的轻量定时器，比再引入一个互锁条件划算得多。
+   *
+   * 两种卡住都要兜：
+   * - **speaking**：音频播完和回合结束两个信号的顺序竞态（见 resolveIdleActivity）。
+   * - **thinking**：出口只有 `response.done`，而有好几条路进得去出不来 ——
+   *   `send()` 在连接不是 OPEN 时只返回 false（`sendText` 以前根本不看返回值）、
+   *   服务端判定这段是噪声不开回合、`response.cancelled` 不走 resolveIdleActivity。
+   *   卡在 thinking 比卡在 speaking 更糟：永久的三点气泡，而且 busy 恒为真，
+   *   于是点她不说话、主动感知整层静默。
    */
   private startActivityWatchdog(): void {
     if (this.activityWatchdog) return;
@@ -209,7 +299,23 @@ export class RealtimeSession {
       if (this.lastActivity === 'speaking' && !this.speaking) {
         reportDiagnostic('activity: ⚠ 看门狗发现卡在 speaking，已复位');
         this.resolveIdleActivity();
+        return;
       }
+      if (this.lastActivity !== 'thinking') return;
+      // 她真的在生成、或者本地工具还在跑，就是正常的「在想」，不要打扰。
+      if (this.responseActive || this.inFlightTools.size > 0) {
+        this.thinkingSince = Date.now();
+        return;
+      }
+      if (Date.now() - this.thinkingSince < THINKING_TIMEOUT_MS) return;
+      reportDiagnostic('activity: ⚠ 看门狗发现卡在 thinking，已复位');
+      // 必须告诉用户 —— 这条路径下她是真的没收到/没回，静默复位只会让人
+      // 以为自己没说清楚，又说一遍。
+      this.options.emit({
+        type: 'error',
+        message: '这一句她没有回应，可能是连接断了。再说一次试试。',
+      });
+      this.resolveIdleActivity();
     }, 500);
   }
 
@@ -231,8 +337,12 @@ export class RealtimeSession {
   async enableMic(): Promise<void> {
     // 按住说话模式下不能常开麦 —— 开了就违背「不持续开麦」这个承诺。
     if (!this.listening) return;
-    this.micWanted = true;
+    // 顺序要紧：`micWanted` 必须在确认会话已启动**之后**才置位。
+    // 反过来写的话，stop() 与 start() 竞态时它会留在 true，
+    // 之后 resolveIdleActivity() 一直报 'listening' 而麦克风其实没开 ——
+    // 界面显示在听、实际不在听，而且不报错。
     if (!this.started) return;
+    this.micWanted = true;
     try {
       await this.mic.start();
       reportDiagnostic('mic: 会话已开启麦克风（持续采集）');
@@ -362,6 +472,9 @@ export class RealtimeSession {
   }
 
   private setActivity(value: 'idle' | 'listening' | 'thinking' | 'speaking'): void {
+    if (value === 'thinking' && this.lastActivity !== 'thinking') {
+      this.thinkingSince = Date.now();
+    }
     this.lastActivity = value;
     this.options.emit({ type: 'activity', value });
   }
@@ -437,6 +550,9 @@ export class RealtimeSession {
       this.ws = null;
       this.clearTimers();
       this.speech.flush();
+      // 连接没了，这一轮的所有状态都必须作废 —— 否则会跨连接泄漏，
+      // 表现为重连后「她不说话」或「ASR 气泡永久卡住」。见 abandonTurn。
+      this.abandonTurn();
       if (this.closedByUs) {
         this.options.emit({ type: 'connection', state: 'closed' });
         return;
@@ -510,6 +626,19 @@ export class RealtimeSession {
     this.send({ type: 'session.update', session });
   }
 
+  /**
+   * 用户主动重试：把退避计数清零并立刻重连。
+   *
+   * 退避耗尽（8 次）之后 scheduleReconnect 就彻底不再重试了，而提示语承诺
+   * 「点一下她再试」—— 这个方法就是让那句话成立的那一半。
+   */
+  retryNow(): void {
+    if (!this.started || this.connected) return;
+    this.attempts = 0;
+    this.closedByUs = false;
+    void this.connect(true);
+  }
+
   private scheduleReconnect(): void {
     if (!this.started || this.closedByUs) return;
     this.attempts++;
@@ -539,7 +668,9 @@ export class RealtimeSession {
       this.ws?.close(1000, 'rotate');
       this.ws = null;
       this.speech.flush();
-      this.resetTurnState();
+      // 轮换对用户应当是不可见的，所以更不能留下残留 —— 一个卡住的 ASR 气泡
+      // 会在毫无征兆的时刻出现（30 分钟那一刻）并且再也不消失。
+      this.abandonTurn();
       await this.connect(true);
     } finally {
       this.rotating = false;
@@ -587,11 +718,28 @@ export class RealtimeSession {
     this.transcript.push({ role: 'user', text: trimmed, at: Date.now() });
     this.options.emit({ type: 'user_transcript', text: trimmed, final: true });
     this.resetTurnState();
-    this.send({
-      type: 'conversation.item.create',
-      item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: trimmed }] },
-    });
-    this.send({ type: 'response.create' });
+    const sent =
+      this.send({
+        type: 'conversation.item.create',
+        item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: trimmed }] },
+      }) && this.send({ type: 'response.create' });
+    if (!sent) {
+      // **必须出声报错。** 原来这里不看 send() 的返回值，而它在 socket 不是 OPEN
+      // 时只是 return false —— 于是连接断着的时候这句话悄悄丢了，活动状态却切到
+      // thinking 再也出不来：永久三点气泡、点她不说话、主动感知整层静默，
+      // 全程零报错。这类无声失败在这个项目里已经反复出现过。
+      reportDiagnostic('send: ⚠ 连接不可用，这一句没发出去');
+      this.options.emit({
+        type: 'error',
+        message: '连接断了，这句话没发出去。正在重连，稍等一下再说一次。',
+      });
+      this.resolveIdleActivity();
+      // 顺手踢一次重连。重连次数耗尽后提示语写的是「点一下她再试」，
+      // 而在这之前**没有任何代码会真的重建连接** —— 点她走的是 sendText，
+      // 它只判 session 存不存在（存在），于是那句承诺是空的。
+      this.retryNow();
+      return;
+    }
     this.setActivity('thinking');
 
     // 实测过的坑：她可能只是「口头答应」而不真的调工具。见 armToolNudge 的注释。
@@ -679,8 +827,13 @@ export class RealtimeSession {
     this.speech.unduck();
     // 先立起丢弃闸门，再发 cancel —— cancel 之后还会有在途增量（实测 4 条）。
     this.suppressAudio = true;
+    this.armSuppressExpiry();
     if (this.responseActive) this.send({ type: 'response.cancel' });
     this.responseActive = false;
+    this.activeResponseId = null;
+    // 打断之后她不说话了，音频上行必须恢复（「不可打断」期间是停掉的），
+    // 否则用户接下来说的话一帧都传不上去 —— 表现为「打断成功了但她再也听不见」。
+    this.releaseMicUpload();
     if (this.nudgeTimer) {
       clearTimeout(this.nudgeTimer);
       this.nudgeTimer = null;
@@ -717,6 +870,74 @@ export class RealtimeSession {
     this.inFlightTools.clear();
   }
 
+  /**
+   * 放弃当前回合并把所有跨回合状态复位。连接断开/重连/30 分钟轮换都要走这里。
+   *
+   * 为什么必须有这么一个统一的地方：原来 close 回调只调了 `speech.flush()`、
+   * `rotate()` 只调了 `resetTurnState()`（而它只清工具状态），于是一串状态会
+   * **跨连接泄漏**：
+   * - `responseActive` 留在 true → `speaking` 恒为真 → 「不可打断」规则把
+   *   重连后用户说的第一句话连 speech_started/stopped 一起吃掉，界面毫无反应。
+   * - `suppressAudio` 留在 true → 新连接的第一段音频被整段丢弃，她「不说话」。
+   * - `userPartial` 留着 → **ASR 气泡永久卡住**。这是用户报的那个 bug 的主因：
+   *   清空用户气泡只有「转写 final」和「activity 回到 idle」两条路，而持续聆听
+   *   下 activity 恒为 'listening'（第二条是死代码），所以只要 final 没来就再也
+   *   清不掉了。重连和轮换恰好都会让 final 永远不来。
+   */
+  private abandonTurn(): void {
+    this.cancelBargeInTimer();
+    this.speech.unduck();
+    this.responseActive = false;
+    this.activeResponseId = null;
+    this.clearSuppressExpiry();
+    this.suppressAudio = false;
+    this.suppressLogged = false;
+    this.firstDeltaLogged = false;
+    this.vadIgnored = false;
+    this.micHeld = false;
+    this.awaitingToolFor = null;
+    if (this.nudgeTimer) {
+      clearTimeout(this.nudgeTimer);
+      this.nudgeTimer = null;
+    }
+    this.resetTurnState();
+    this.clearPartials();
+  }
+
+  private clearSuppressExpiry(): void {
+    if (this.suppressTimer) {
+      clearTimeout(this.suppressTimer);
+      this.suppressTimer = null;
+    }
+  }
+
+  /** 给丢弃闸门上一个硬上界，见 SUPPRESS_MAX_MS。 */
+  private armSuppressExpiry(): void {
+    this.clearSuppressExpiry();
+    this.suppressTimer = setTimeout(() => {
+      this.suppressTimer = null;
+      if (!this.suppressAudio) return;
+      reportDiagnostic('turn: ⚠ 丢弃闸门超时自动解除（response.created 没来）');
+      this.suppressAudio = false;
+      this.suppressLogged = false;
+    }, SUPPRESS_MAX_MS);
+  }
+
+  /**
+   * 清掉两个气泡的在途文本，并通知 UI。
+   *
+   * 发 `final: true` 且文本为空是和 UI 约定的「把气泡收掉」信号
+   * （App.tsx 对 final 一律清空，不看内容）。不发事件只清本地变量是没用的 ——
+   * UI 自己存了一份。
+   */
+  private clearPartials(): void {
+    if (this.userPartial) {
+      this.userPartial = '';
+      this.options.emit({ type: 'user_transcript', text: '', final: true });
+    }
+    this.petPartial = '';
+  }
+
   // ---- 接收 ----
 
   private handle(event: ServerEvent): void {
@@ -748,11 +969,14 @@ export class RealtimeSession {
         reportDiagnostic('vad: 服务端检测到人声开始');
         // 「可打断」关着的时候，她说话期间的 VAD 事件被完全忽略 —— 连压音量都不做。
         // 这不是偷懒：环境噪声和她自己从扬声器出来的声音都会触发 VAD，
-        // 压一下音量再恢复听上去就是她说话一卡一卡的。想打断就长按或按 Esc
+        // 压一下音量再恢复听上去就是她说话一卡一卡的。想打断就长按她
         // （走 interrupt()，不受这个开关影响）。
         // 注意只在「她正在说话」时忽略 —— 她没说话时这就是正常的新回合开始，必须照常处理。
         if (!this.interruptible && this.speaking) {
           this.vadIgnored = true;
+          // 光忽略不够：服务端 VAD 会自己 commit 并开新回合，在服务端截断她。
+          // 必须同时掐掉音频上行。见 micHeld 的注释。
+          this.holdMicUpload();
           return;
         }
         // 不立刻打断 —— 打断是不可逆的（flush + response.cancel 砍掉的音频回不来），
@@ -789,7 +1013,12 @@ export class RealtimeSession {
         // 用户看到的就是「一句话重复好几遍」。
         // 注意这与 OpenAI Realtime 的惯例相反，也与她自己的
         // response.audio_transcript.delta 不一致（那个确实是增量，已实测）。
-        this.userPartial = event.delta ?? this.userPartial;
+        //
+        // delta 缺失时**忽略这一条**，不要回退成 userPartial 再 emit 一遍：
+        // schema 里 delta 是 optional，而「拿旧值当新内容」会把上一句的残留
+        // 重新推给 UI（配合下面的卡住问题，就是一句旧话赖在屏幕上不走）。
+        if (event.delta === undefined) return;
+        this.userPartial = event.delta;
         // 听到实际内容 = 确认是人在说话，这时才执行不可逆的打断。
         if (this.userPartial.trim()) this.confirmBargeIn();
         this.options.emit({ type: 'user_transcript', text: this.userPartial, final: false });
@@ -799,11 +1028,26 @@ export class RealtimeSession {
         reportDiagnostic(`asr: 转写完成「${(event.transcript ?? '').slice(0, 40)}」`);
         const text = (event.transcript ?? this.userPartial).trim();
         this.userPartial = '';
-        if (!text) return;
+        if (!text) {
+          // 空转写（只听到「呃」、或者服务端判定这段没内容）也**必须**发一条
+          // final 把气泡收掉。原来这里直接 return，于是 delta 已经把「呃」推到
+          // 屏幕上、而唯一的清空信号不来了 —— 气泡就永久留着。
+          this.options.emit({ type: 'user_transcript', text: '', final: true });
+          return;
+        }
         this.transcript.push({ role: 'user', text, at: Date.now() });
         this.options.emit({ type: 'user_transcript', text, final: true });
         // 语音回合同样会出现「嘴上答应、不调工具」，所以这里也要兜一刀。
         this.armToolNudge(text);
+        return;
+      }
+      case 'conversation.item.input_audio_transcription.failed': {
+        // ASR 失败也要把气泡收掉，否则半句话永久留在屏幕上。
+        reportDiagnostic(`asr: ⚠ 转写失败 ${event.error?.message ?? '(无消息)'}`);
+        this.userPartial = '';
+        this.options.emit({ type: 'user_transcript', text: '', final: true });
+        // 不弹 error：转写失败通常不影响她听懂（音频本身照常进模型），
+        // 弹一个用户无法处理的报错只会添乱。
         return;
       }
       case 'response.audio_transcript.delta':
@@ -858,7 +1102,10 @@ export class RealtimeSession {
         reportDiagnostic('turn: 服务端开始生成回复');
         this.firstDeltaLogged = false;
         this.responseActive = true;
+        this.activeResponseId =
+          (event.response as { id?: string }).id ?? null;
         // 新的一轮开始了，之前打断留下的在途音频已经结束。
+        this.clearSuppressExpiry();
         this.suppressAudio = false;
         this.suppressLogged = false;
         this.resetTurnState();
@@ -866,12 +1113,24 @@ export class RealtimeSession {
       }
       case 'response.cancelled': {
         this.responseActive = false;
+        this.activeResponseId = null;
+        // 取消之后没有 response.done 会来，所以必须自己把活动状态落地 ——
+        // 不然就永久停在 thinking（三点气泡不走、点她不说话）。
+        this.resolveIdleActivity();
         return;
       }
       case 'response.done': {
+        const done = event.response as { id?: string; status?: string };
+        // **必须对 id**：服务端 VAD 会在一轮还没结束时自己开下一轮，于是上一轮
+        // 迟到的 done 会把**新**那一轮的 responseActive 清零 —— 她明明在说话，
+        // `speaking` 却成了假，「不可打断」规则随即被绕过（D2 那条的另一个入口）。
+        if (done.id && this.activeResponseId && done.id !== this.activeResponseId) {
+          reportDiagnostic(`turn: 忽略上一轮迟到的 response.done（${done.id}）`);
+          return;
+        }
         this.responseActive = false;
-        const status = (event.response as { status?: string }).status;
-        if (status === 'failed') {
+        this.activeResponseId = null;
+        if (done.status === 'failed') {
           this.options.emit({ type: 'error', message: '这一轮没说完，再说一次试试。' });
         }
         this.resolveIdleActivity();
@@ -982,6 +1241,7 @@ export class RealtimeSession {
     this.reconnectTimer = null;
     this.rotateTimer = null;
     this.nudgeTimer = null;
+    this.clearSuppressExpiry();
   }
 
   async stop(): Promise<void> {
@@ -999,8 +1259,15 @@ export class RealtimeSession {
     } catch {
       /* 已经关了 */
     }
-    this.resetTurnState();
-    this.responseActive = false;
+    // 停会话要把所有跨回合状态一起作废，否则下次 start() 会带着上一次的
+    // responseActive / 丢弃闸门 / 卡住的气泡文本开场。
+    this.abandonTurn();
+    this.cancelBargeInTimer();
+    if (this.activityWatchdog) {
+      clearInterval(this.activityWatchdog);
+      this.activityWatchdog = null;
+    }
+    this.lastActivity = 'idle';
     this.options.emit({ type: 'activity', value: 'idle' });
     this.options.emit({ type: 'connection', state: 'closed' });
   }

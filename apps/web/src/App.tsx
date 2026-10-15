@@ -17,6 +17,12 @@ import { desktop } from './platform/desktop';
 import { reportDiagnostic } from './platform/diagnostics';
 import { Bubble } from './ui/Bubble';
 import { popupPetMenu } from './ui/PetMenu';
+import {
+  connectionFeedback,
+  escapeAction,
+  longPressPlan,
+  sessionSyncFor,
+} from './ui/uiState';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
 import type { ActionName, Expression, FxName } from '../../../shared/pet';
 import type { PetEvent } from '../../../shared/brain';
@@ -53,8 +59,65 @@ export function App() {
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState('');
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  /**
+   * 已经同步到会话上的那份设置。
+   *
+   * 设置有三条写入路径（右键菜单、设置窗、托盘），其中两条只能靠 Rust 的广播
+   * 通知到这边，而广播是**发给所有窗口的，包括发起方** —— 直接调用那条路径会和
+   * 广播撞在一起。用这个快照去算差异，后到的那次自然退化成空操作，
+   * 不会重开麦克风、也不会重连两次。state 不行：事件回调捕获的是旧值。
+   */
+  const syncedRef = useRef<Settings>(defaultSettings);
   /** 自增一次就重建大脑（换模式/换模型时用）。 */
   const [brainGeneration, setBrainGeneration] = useState(0);
+
+  // 提示/错误各只有一个 timer handle。
+  //
+  // 原来每处都现场 `window.setTimeout(() => setNotice(null), ...)` 又不存 handle，
+  // 于是两条提示叠在一起时，先到的那个 timer 会把**后到的**提示提前抹掉
+  // （看起来就是「提示一闪就没了」）。卸载时也没人清，React 会抱怨更新已卸载组件。
+  const noticeTimer = useRef(0);
+  const errorTimer = useRef(0);
+  const showNotice = useCallback((text: string, ms = 4000) => {
+    window.clearTimeout(noticeTimer.current);
+    setNotice(text);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), ms);
+  }, []);
+  const showError = useCallback((text: string, ms = 5000) => {
+    window.clearTimeout(errorTimer.current);
+    setError(text);
+    // ms = 0 表示不自动消失 —— 启动失败这类「她根本动不了」的问题不该自己溜走。
+    if (ms > 0) errorTimer.current = window.setTimeout(() => setError(null), ms);
+  }, []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(noticeTimer.current);
+      window.clearTimeout(errorTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * 让她开口的唯一入口（被摸的旁白、主动搭话、输入框发送都走这里）。
+   *
+   * 原来三处 sendText 各写一遍错误处理，其中两处是 `.catch(() => {})` ——
+   * 于是「点了表情变了但不说话」查不出原因，她的主动搭话 / 拖放反应 / 空闲行为
+   * **整层失败静默**（点了、表情变了、就是不出声，日志里什么都没有）。
+   * 任何让她开不了口的情况都必须冒到界面上，哪怕只是一句笼统的提示。
+   */
+  const speak = useCallback(
+    (text: string) => {
+      const brain = brainRef.current;
+      if (!brain) {
+        showError('她还没准备好说话（大脑没启动）。', 4000);
+        return;
+      }
+      void brain.sendText(text).catch((e: unknown) => {
+        showError(e instanceof Error ? e.message : '她这次没说出话来。', 5000);
+      });
+    },
+    [showError],
+  );
 
   // 事件回调（托盘、热键）捕获的是旧 state，所以用 ref 做镜像。
   useEffect(() => {
@@ -140,6 +203,15 @@ export function App() {
           rig?.setExpression('curious');
           break;
         case 'activity':
+          // 新回合开始（从「不忙」跨到「忙」）时把上一句清掉。
+          //
+          // 不清的话：上一句 linger 到期后 petText 还留在 state 里，新回合把
+          // speaking 翻 true，Bubble 的 effect 重跑又把**上一句**显示出来，
+          // 一直挂到第一条新字幕盖掉它 —— 音频先于字幕时能闪好几百毫秒，
+          // 用户看到的是「她说完的话又莫名闪一下」。
+          // 刻意只在这个边沿清，**不**在 user_transcript 里清她的气泡：
+          // 那是之前修过的另一个 bug（噪声蹦半个字就把她的话抹掉，回复一闪而过）。
+          if (isBusyActivity(event.value) && !busyRef.current) setPetText('');
           setThinking(event.value === 'thinking');
           setSpeaking(event.value === 'speaking');
           // 语义见 isBusyActivity 的注释（这个判断错过一次，所以有测试钉住）。
@@ -148,8 +220,7 @@ export function App() {
           break;
         case 'privacy_notice':
           // 隐私动作必须可见 —— 这条提示不是装饰，是 AGENTS.md 的要求。
-          setNotice(noticeText(event.action, event.reason));
-          window.setTimeout(() => setNotice(null), 4000);
+          showNotice(noticeText(event.action, event.reason), 4000);
           break;
         case 'tool_start':
           if (event.name === 'express') applyVisualIntent(rig, event.args);
@@ -162,16 +233,22 @@ export function App() {
           break;
         case 'notice':
           // 不是错误，所以用提示气泡（和隐私提示同一条），不配红色告警样式。
-          setNotice(event.message);
-          window.setTimeout(() => setNotice(null), 5000);
+          showNotice(event.message, 5000);
           break;
-        case 'connection':
-          if (event.state === 'open') setError(null);
-          else if (event.state === 'closed' && event.detail) setError(event.detail);
+        case 'connection': {
+          // 'reconnecting' 原来完全不处理，重连期间界面一动不动 —— 用户只知道
+          // 「跟她说话没反应」，和麦克风坏了长得一模一样。要不要提示看 detail，
+          // 判断逻辑在 connectionFeedback（有测试钉住，别在这儿再分支一遍）。
+          const feedback = connectionFeedback(event.state, event.detail);
+          if (feedback.kind === 'clear') {
+            window.clearTimeout(errorTimer.current);
+            setError(null);
+          } else if (feedback.kind === 'notice') showNotice(feedback.text, 5000);
+          else if (feedback.kind === 'error') showError(feedback.text, 6000);
           break;
+        }
         case 'error':
-          setError(event.message);
-          window.setTimeout(() => setError(null), 6000);
+          showError(event.message, 6000);
           break;
         default:
           break;
@@ -182,6 +259,9 @@ export function App() {
       const value = await desktop.getSettings();
       if (cancelled) return;
       setSettings(value);
+      // 大脑就是按这份设置建起来的，所以它同时是「已同步」的基准 ——
+      // 不种下去的话，第一次广播会拿默认值当上一份去比，凭空算出一次重建。
+      syncedRef.current = value;
       applyAppearance(value);
       brain = createBrain(value.brainMode);
       brainRef.current = brain;
@@ -189,7 +269,7 @@ export function App() {
       // 关掉持续聆听时不要在启动就开麦 —— 麦克风权限留到第一次长按再申请。
       if (value.voiceEnabled) await brain.start(value.listening);
     })().catch((e: unknown) =>
-      setError(e instanceof Error ? e.message : '启动失败。'),
+      showError(e instanceof Error ? e.message : '启动失败。', 0),
     );
 
     return () => {
@@ -198,7 +278,7 @@ export function App() {
       brainRef.current = null;
       void brain?.dispose();
     };
-  }, [applyAppearance, brainGeneration]);
+  }, [applyAppearance, brainGeneration, showNotice, showError]);
 
   // ---- 主动感知（看应用、接拖放、空闲行动） ----
   // Awareness 只产出意图，由这里决定要不要真的让她开口 —— 它不认识 brain，也不认识渲染器。
@@ -212,15 +292,14 @@ export function App() {
       },
       onIntent: (intent) => {
         // 背后发生过隐私读取的意图，必须先冒提示再说话。
-        if (intent.privacy) {
-          setNotice(noticeText(intent.privacy, ''));
-          window.setTimeout(() => setNotice(null), 4000);
-        }
+        if (intent.privacy) showNotice(noticeText(intent.privacy, ''), 4000);
         // 睡觉是**状态**不是一次性动作：只 playAction('sleep') 的话闲置摇摆和
         // 动作自动回位会把她顶起来，而且醒不过来（wake 得有对应的出口）。
         if (intent.kind === 'nap') rigRef.current?.setSleeping(true);
         if (intent.kind === 'wake') rigRef.current?.setSleeping(false);
-        void brainRef.current?.sendText(intent.prompt).catch(() => {});
+        // 原来这里是 `.catch(() => {})`，于是主动搭话、拖放反应、空闲行为的失败
+        // 全都无声无息。统一走 speak()，和被摸开口那条路一个处理方式。
+        speak(intent.prompt);
       },
     });
     awarenessRef.current = awareness;
@@ -229,17 +308,61 @@ export function App() {
       awarenessRef.current = null;
       awareness.stop();
     };
-  }, []);
+  }, [showNotice, speak]);
+
+  /**
+   * 把一份新设置应用到界面**和正在进行的会话**上。设置的三条写入路径全部汇到这里。
+   *
+   * 为什么要汇到一处：原来只有右键菜单那条会调 refreshSettings()，设置窗和托盘
+   * 都只是广播新值、这边收到后只更新缓存、不动会话 —— 于是在设置窗里关掉
+   * 「允许说话打断她」**完全无效**，她照常被打断（用户实际报上来的 bug）；
+   * 「持续聆听」「音色」「大脑模式」「语音对话」在设置窗里改同样全部静默失效，
+   * 界面上开关是关的、行为还是开的，没人能看出哪儿断了。
+   *
+   * 为什么不干脆只留广播这一条路（那样只有一条路径，更干净）：
+   * 浏览器调试路径的 onSettingsChanged 是 noop（见 platform/desktop.ts 的
+   * browserFallback），而且 Tauri 的 listen 要等动态 import 完才注册，启动早期的
+   * 广播会漏。所以直接调用那条留着，靠 syncedRef 的差异去重 —— Rust 的 emit 是
+   * 发给所有窗口的（包括发起方），两条路必然撞上，谁先到谁干活，后到的那次
+   * 算出 'none' 就什么都不做，不会重开麦克风、也不会重连两次。
+   *
+   * 不会转圈：refreshSettings() 只是读设置再推下去（Brain.loadSettings 不回写），
+   * 不触发新的广播。
+   */
+  const syncSession = useCallback(
+    (next: Settings) => {
+      const prev = syncedRef.current;
+      syncedRef.current = next;
+      setSettings(next);
+      applyAppearance(next);
+      // 哪些差异要动会话、哪些不用，判断在 sessionSyncFor（有测试钉住，
+      // 别在这儿再分支一遍 —— 原来就是分支散在三处才漏掉两条）。
+      const action = sessionSyncFor(prev, next);
+      if (action === 'none') return;
+      if (action === 'rebuild') {
+        // 换大脑实现：由大脑那个 effect 重跑负责，这里只标记。
+        setBrainGeneration((n) => n + 1);
+        return;
+      }
+      const brain = brainRef.current;
+      if (!brain) return;
+      void (async () => {
+        if (action === 'start') await brain.start(true);
+        else if (action === 'stop') await brain.stop();
+        else if (action === 'voice') await brain.setVoice(next.voice);
+        else await brain.refreshSettings();
+      })().catch((e: unknown) =>
+        showError(e instanceof Error ? e.message : '设置没能应用到这次会话。', 5000),
+      );
+    },
+    [applyAppearance, showError],
+  );
 
   // ---- 设置的跨窗口同步 ----
   // 设置窗是另一个 webview，它改了设置这边不会自动知道（反之亦然）。
-  // 用户看到的症状是「右键菜单和设置里同一个开关状态不一样」。
-  useEffect(() => {
-    return desktop.onSettingsChanged((next) => {
-      setSettings(next);
-      applyAppearance(next);
-    });
-  }, [applyAppearance]);
+  // 不同步的症状有两层：轻的是「右键菜单和设置里同一个开关状态不一样」，
+  // 重的是设置窗里的改动根本不生效 —— 所以这里必须走 syncSession，而不是只 setSettings。
+  useEffect(() => desktop.onSettingsChanged(syncSession), [syncSession]);
 
   // Rust 的命中轮询只用来**记录**光标压在哪个部位；反应由单击触发。
   //
@@ -279,72 +402,46 @@ export function App() {
   }, []);
 
   /**
-   * 设置改动的唯一入口（右键菜单、托盘、设置窗都走这里）。
+   * 设置改动的唯一入口（右键菜单用）。
    *
-   * 哪些改动需要重建语音会话是有依据的，不是保守起见全重建：
-   * - voiceEnabled：从无到有要建会话，从有到无要停。
-   * - voice（音色）：realtime 首次出音后 voice 不可改，只能重建。
-   * - brainMode：换的是整个大脑实现，必须重建。
-   * 其余（聆听模式、是否可打断、缩放、减少动效）都是会话内热生效，
-   * 重建反而会打断正在说的话。
+   * 写完之后立刻 syncSession：哪些改动需要重连/换音色/重建大脑由它按差异决定，
+   * 不是保守起见全重建（重建会打断她正在说的话）。
    */
   const applySettingsPatch = useCallback(
     (patch: Partial<Settings>) => {
-      void (async () => {
-        const next = await desktop.setSettings(patch);
-        setSettings(next);
-        applyAppearance(next);
-        const brain = brainRef.current;
-        if (!brain) return;
-
-        if ('voiceEnabled' in patch) {
-          if (next.voiceEnabled) await brain.start(true);
-          else await brain.stop();
-          return;
-        }
-        if ('voice' in patch) {
-          await brain.setVoice(next.voice);
-          return;
-        }
-        if ('brainMode' in patch || 'chatModel' in patch) {
-          // 大脑换实现：由 reloadBrain 负责，这里只标记。
-          setBrainGeneration((n) => n + 1);
-          return;
-        }
-        await brain.refreshSettings();
-      })().catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : '保存设置失败。'),
-      );
+      void desktop
+        .setSettings(patch)
+        .then(syncSession)
+        .catch((e: unknown) =>
+          showError(e instanceof Error ? e.message : '保存设置失败。', 5000),
+        );
     },
-    [applyAppearance],
+    [syncSession, showError],
   );
 
   // ---- 托盘、热键、拖放 ----
   const reloadSettings = useCallback(async () => {
     const next = await desktop.getSettings();
-    setSettings(next);
-    applyAppearance(next);
+    syncSession(next);
     return next;
-  }, [applyAppearance]);
+  }, [syncSession]);
 
   useEffect(() => {
-    const fail = (e: unknown) => setError(e instanceof Error ? e.message : '操作失败。');
+    const fail = (e: unknown) =>
+      showError(e instanceof Error ? e.message : '操作失败。', 5000);
 
     const offTray = desktop.onTrayCommand((command) => {
       void (async () => {
-        // 托盘是设置的权威写入方，所以这里先重读，再按新值动作。
-        const next = await reloadSettings();
-        const brain = brainRef.current;
-        if (!brain) return;
+        // 托盘是设置的权威写入方（Rust 侧直接写，再把菜单 id 转发过来），
+        // 所以这里先重读 —— reloadSettings 走 syncSession，顺带把该做的事
+        // （开/停语音、换音色、换大脑、改缩放）按差异做掉。
+        //
+        // 原来这里自己写了 voice / voice_* 两个分支，和右键菜单那条重复了一遍，
+        // 而且漏掉了 brainMode 和缩放。现在只留托盘独有的那件事：开输入框。
+        await reloadSettings();
         if (command === 'talk') {
           openComposer();
-          if (!brain.running) await brain.start(true);
-        } else if (command === 'voice') {
-          if (next.voiceEnabled) await brain.start(true);
-          else await brain.stop();
-        } else if (command.startsWith('voice_')) {
-          // 换音色要重建会话：模型首次出音后 voice 不可改。
-          await brain.setVoice(next.voice);
+          if (!brainRef.current?.running) await brainRef.current?.start(true);
         }
       })().catch(fail);
     });
@@ -368,7 +465,29 @@ export function App() {
       offHotkey();
       offDrop();
     };
-  }, [reloadSettings, openComposer]);
+  }, [reloadSettings, openComposer, closeComposer, showError]);
+
+  // ---- Esc：让她闭嘴 ----
+  //
+  // 监听必须挂在 window 上。原来全仓**唯一**的 Esc 监听在输入框的 onKeyDown 里，
+  // 于是「不可打断模式下按 Esc 让她停下」要先双击她把输入框点出来才按得到 ——
+  // 而设置里和会话层的文案都是直接告诉用户「按 Esc 或长按她」，两条路当时都不通。
+  //
+  // 一次 Esc 只干一件事（分派见 escapeAction）：输入框开着就只关框。
+  // 原来那处是 interrupt() + closeComposer() 一起做，想关打字框顺手把她掐断了。
+  //
+  // 注意这是**窗口级**而不是系统级监听：桌宠窗不是 key window 时收不到键盘事件，
+  // 所以 Esc 只在应用处于活动状态时有效。刻意不去 Rust 侧注册全局 Esc ——
+  // 那会把 Esc 从所有别的应用手里抢走。长按她是不依赖焦点的那条退路。
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (escapeAction(composingRef.current) === 'close-composer') closeComposer();
+      else brainRef.current?.interrupt();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [closeComposer]);
 
   // ---- 文字输入 ----
   // ---- 指针手势：一条 pointer 流上要同时分辨「轻点 / 长按说话 / 拖动」 ----
@@ -430,61 +549,53 @@ export function App() {
         // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
         rigRef.current?.reactToTap(lastHitPart.current);
         const line = touchTalk.current.narrate(lastHitPart.current, busyRef.current);
-        if (line) {
-          const brain = brainRef.current;
-          if (!brain) {
-            // 原来这里是 .catch(() => {}) 把错误吞了，于是「点了表情变了但不说话」
-            // 完全查不出原因。任何让她开不了口的情况都要说出来。
-            setError('她还没准备好说话（大脑没启动）。');
-            window.setTimeout(() => setError(null), 4000);
-          } else {
-            void brain.sendText(line).catch((e: unknown) => {
-              setError(e instanceof Error ? e.message : '她这次没说出话来。');
-              window.setTimeout(() => setError(null), 5000);
-            });
-          }
-        }
+        // 原来这里是 .catch(() => {}) 把错误吞了，于是「点了表情变了但不说话」
+        // 完全查不出原因。任何让她开不了口的情况都要说出来 —— 处理统一在 speak()。
+        if (line) speak(line);
       }
     }
-  }, []);
+  }, [speak]);
 
   const beginGesture = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
-      // 长按 = 按住说话的条件，**问大脑而不是读设置**。
+      // 长按要不要启动，判断在 longPressPlan（有测试钉住）。
       //
-      // 原来写的是 `!settings.listening`，但 listening 默认是 true，而聪明模式
-      // 根本没有「持续聆听」这回事（没有服务端 VAD）—— 于是长按在聪明模式下
-      // 永远不成立，功能对默认设置的用户直接不可达。
-      // 大脑的 listening getter 才是权威：realtime 跟随设置，chat 恒为 false。
-      const brain = brainRef.current;
-      // 语音整个关掉时长按**不能静默无事发生** —— 用户按住、说完、松手，
-      // 界面毫无反应，看起来就是麦克风坏了（这正是实际发生过的误判）。
-      // 所以这里给一条明确提示，而不是让条件判断悄悄吞掉这次长按。
-      if (!settings.voiceEnabled) {
+      // 这里**刻意不再看聆听模式**。原来是 `brain !== null && !brain.listening`，
+      // 而 listening 默认 true → pushToTalk 恒为 false → 定时器压根不启动 →
+      // beginPushToTalk() 永远不被调用。于是设置里和会话层都写着的
+      // 「想让她停下，按 Esc 或长按她」对默认设置的用户完全不可达，
+      // 而 RealtimeSession 里那段「持续聆听下长按当『闭嘴听我说』」成了死代码。
+      // 两种模式的语义差别由会话层 beginPushToTalk() 自己分辨，手势层不替它判断。
+      const plan = longPressPlan({
+        voiceEnabled: settings.voiceEnabled,
+        hasBrain: brainRef.current !== null,
+      });
+      if (plan === 'voice-off') {
+        // 语音整个关掉时长按**不能静默无事发生** —— 用户按住、说完、松手，
+        // 界面毫无反应，看起来就是麦克风坏了（这正是实际发生过的误判）。
         gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer: 0 };
-        setNotice('语音现在是关着的。右键菜单里打开「语音对话」就能跟我说话啦。');
-        window.setTimeout(() => setNotice(null), 5000);
+        showNotice('语音现在是关着的。右键菜单里打开「语音对话」就能跟我说话啦。', 5000);
         return;
       }
-      const pushToTalk = brain !== null && !brain.listening;
-      const timer = pushToTalk
-        ? window.setTimeout(() => {
-            const g = gesture.current;
-            if (!g || g.moved) return;
-            g.talking = true;
-            // 按住期间给一个明确的持续状态：侧倾 + 睁大眼 + 耳边音符。
-            // 没有这个，用户按住之后完全不知道她有没有在听。
-            rigRef.current?.setListeningHold(true);
-            void brainRef.current?.beginPushToTalk().catch((err: unknown) => {
-              rigRef.current?.setListeningHold(false);
-              setError(err instanceof Error ? err.message : '麦克风打不开。');
-            });
-          }, LONG_PRESS_MS)
-        : 0;
+      const timer =
+        plan === 'hold'
+          ? window.setTimeout(() => {
+              const g = gesture.current;
+              if (!g || g.moved) return;
+              g.talking = true;
+              // 按住期间给一个明确的持续状态：侧倾 + 睁大眼 + 耳边音符。
+              // 没有这个，用户按住之后完全不知道她有没有在听。
+              rigRef.current?.setListeningHold(true);
+              void brainRef.current?.beginPushToTalk().catch((err: unknown) => {
+                rigRef.current?.setListeningHold(false);
+                showError(err instanceof Error ? err.message : '麦克风打不开。', 5000);
+              });
+            }, LONG_PRESS_MS)
+          : 0;
       gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer };
     },
-    [settings.voiceEnabled],
+    [settings.voiceEnabled, showNotice, showError],
   );
 
   const moveGesture = useCallback((e: React.PointerEvent) => {
@@ -509,10 +620,10 @@ export function App() {
     if (!text) return;
     closeComposer();
     awarenessRef.current?.notifyInteraction();
-    void brainRef.current
-      ?.sendText(text)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : '发送失败。'));
-  }, [draft, closeComposer]);
+    // 走 speak()：原来这里的错误用 setError 直接写、没有人清，一条发送失败的
+    // 红字会一直挂在她头上。
+    speak(text);
+  }, [draft, closeComposer, speak]);
 
   return (
     <>
@@ -579,11 +690,8 @@ export function App() {
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();
-              if (e.key === 'Escape') {
-                // 不可打断模式下，Esc 是用户唯一的「闭嘴」手段。
-                brainRef.current?.interrupt();
-                closeComposer();
-              }
+              // Esc 不在这儿处理：监听挂在 window 上（见上面那个 effect），
+              // 否则输入框开着时一次 Esc 会被两处各处理一遍。
             }}
           />
           {/* 三种关法都给：× 最直观，Esc 给键盘用户，再双击一次和打开的手势对称。 */}

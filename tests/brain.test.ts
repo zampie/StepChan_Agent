@@ -576,7 +576,19 @@ function makeSession(
   events: PetEvent[];
   executed: { name: ToolName; args: unknown }[];
   /** 播放层探针：压音状态可读，出声电平可写，可手动触发「环空了」。 */
-  speech: { ducked: boolean; level: number; drain: () => void; beginSpeaking: () => void };
+  /**
+   * 播放层探针。`playing`/`underrun` 是关键：真实实现里「她在出声」和
+   * 「瞬时电平」是两件事，而打断门控只看前者。
+   */
+  speech: {
+    ducked: boolean;
+    level: number;
+    playing: boolean;
+    flushes: number;
+    drain: () => void;
+    beginSpeaking: () => void;
+    underrun: () => void;
+  };
   /** 采集层探针：不碰真麦克风，只记录开关次数，并能按需喂几帧音频。 */
   mic: {
     starts: number;
@@ -601,9 +613,11 @@ function makeSession(
   // audioLevel / duck / unduck 这三样，所以在实例上替掉它们就够了，
   // 不必把整个 SpeechStream 做成可注入的。
   let ducked = false;
+  let flushes = 0;
   let level = 0;
+  let playing = false;
   const raw = session as unknown as {
-    speech: { duck: () => void; unduck: () => void };
+    speech: { duck: () => void; unduck: () => void; flush: () => number };
     mic: { start: () => Promise<void>; stop: () => void; events: { onFrame: (b: string) => void } };
     started: boolean;
   };
@@ -611,6 +625,24 @@ function makeSession(
     configurable: true,
     get: () => level,
   });
+  // 「她在出声」必须独立于瞬时电平可控。
+  //
+  // 真实实现里这两件事是分开的：`audioLevel` 是 worklet 逐 quantum 的 RMS，
+  // 欠载/句间停顿都会让它瞬时归零；而 `speaking` 是对 started/drained 做过
+  // 去抖的布尔。打断门控只看后者。
+  // 夹具以前只能驱动 level，所以「responseActive 已清零、但环里还有尾音」
+  // 这个真实状态在测试里**无法表达** —— 那条路径上的打断 bug 因此一直没被抓到。
+  Object.defineProperty(raw.speech, 'speaking', {
+    configurable: true,
+    get: () => playing,
+  });
+  // flush 要像真实实现那样**立刻**把出声状态清掉（打断是不可逆的）。
+  raw.speech.flush = () => {
+    playing = false;
+    level = 0;
+    flushes++;
+    return 0;
+  };
   raw.speech.duck = () => {
     ducked = true;
   };
@@ -627,15 +659,36 @@ function makeSession(
         speech: { events?: { onDrained?: () => void; onStarted?: () => void } };
       }
     ).speech.events;
-  const drain = () => handlers()?.onDrained?.();
-  /** 她开始出声：设电平 + 触发 onStarted（真实实现由 worklet 回报）。 */
+  // 注意真实实现对 drained 做了 350ms 去抖，所以这里 drain() 代表的是
+  // **去抖之后**那一次（真的播完了），不是 worklet 的原始 drained。
+  const drain = () => {
+    playing = false;
+    level = 0;
+    handlers()?.onDrained?.();
+  };
+  /** 她开始出声：设电平 + 置出声态 + 触发 onStarted（真实实现由 worklet 回报）。 */
   const beginSpeaking = () => {
     level = 0.4;
+    playing = true;
     handlers()?.onStarted?.();
+  };
+  /**
+   * 欠载：电平瞬时归零但她**还在说**（环里还有尾音）。
+   * 这是 D2 那条 bug 的现场 —— 判据用瞬时电平的话这一刻就会被判成「没在说话」。
+   */
+  const underrun = () => {
+    level = 0;
   };
   const speech = {
     drain,
     beginSpeaking,
+    underrun,
+    get flushes() {
+      return flushes;
+    },
+    get playing() {
+      return playing;
+    },
     get ducked() {
       return ducked;
     },
@@ -1285,7 +1338,7 @@ describe('RealtimeSession：可打断开关关闭时（默认）语音不打断�
   /** 让她处于「正在说话」的状态。 */
   function speaking(harness: ReturnType<typeof makeSession>) {
     harness.ws.deliver({ type: 'response.created', response: {} });
-    harness.speech.level = 0.5;
+    harness.speech.beginSpeaking();
     harness.ws.sent.length = 0;
   }
 
@@ -2015,8 +2068,307 @@ describe('活动状态：不能卡在 speaking', () => {
     const { ws, events, speech } = makeSession();
     ws.deliver({ type: 'response.created', response: {} });
     speech.beginSpeaking();
-    speech.level = 0;
+    // 「播完了」要用 drain() 表达，不是把电平设成 0。
+    // 这条测试原来写的是 `speech.level = 0`，而**电平归零不等于播完** ——
+    // 句中每一次欠载都会让它归零。用电平当判据正是「关了开关还是被打断」
+    // 的根因之一，所以这里也必须按真实语义写。
+    speech.drain();
     ws.deliver({ type: 'response.done', response: { status: 'completed' } });
     assert.notEqual(lastActivity(events), 'speaking');
+  });
+
+  test('欠载（电平瞬时归零）不算播完，仍然是 speaking', () => {
+    const { ws, events, speech } = makeSession();
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.beginSpeaking();
+    speech.underrun(); // 网络卡一下，电平掉到 0，但环里还有尾音
+    ws.deliver({ type: 'response.done', response: { status: 'completed' } });
+    assert.equal(
+      lastActivity(events),
+      'speaking',
+      '她还在出声就不能退出 speaking —— 退出会让打断门控失效',
+    );
+  });
+});
+
+/** 最后一次 activity 事件的值。模块级，给下面几个 describe 共用。 */
+function lastActivityOf(events: PetEvent[]): string | undefined {
+  const list = events.filter((e) => e.type === 'activity');
+  const last = list.at(-1);
+  return last && last.type === 'activity' ? last.value : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// 一次独立评审查出的一批状态机缺陷的回归测试。
+//
+// 这批缺陷有个共同点：**全都是无声失败**，而且大半只在特定事件序列下出现
+// （重连、30 分钟轮换、事件乱序、欠载）。它们在真机上表现为用户报的两句话：
+// 「ASR 气泡有时卡住不消失」和「关了『允许说话打断她』还是会被打断」。
+// 没有这些测试就无法确认修好了 —— 只能等用户再碰上一次。
+// ---------------------------------------------------------------------------
+
+describe('回归：「关了开关还是被打断」的三个独立根因', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  test('D2 尾音期间（responseActive 已清零）不能被打断', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    // 模型出音快于播放：这一轮在服务端已经结束，但环里还压着尾音。
+    harness.ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    // 而且恰好赶上一次欠载 —— 瞬时电平也是 0。
+    // **两个条件必须同时摆出来**，否则这条测试没有区分力：旧判据是
+    // `responseActive || audioLevel > 0`，只满足一个的话它照样认为她在说话，
+    // 测试在修复前后都绿，等于什么都没测。
+    harness.speech.underrun();
+    assert.equal(harness.speech.playing, true, '前提：她还在出声（环里有尾音）');
+    const flushesBefore = harness.speech.flushes;
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    assert.equal(harness.speech.flushes, flushesBefore, '不该 flush 掉她的尾音');
+    assert.equal(
+      harness.ws.sentTypes().includes('response.cancel'),
+      false,
+      '不该发 response.cancel',
+    );
+    assert.equal(harness.speech.ducked, false, '开关关着连压音量都不该做');
+  });
+
+  test('D2 欠载（电平瞬时归零）期间也不能被打断', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.speech.underrun(); // 网络卡一下
+    const flushesBefore = harness.speech.flushes;
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    assert.equal(harness.speech.flushes, flushesBefore, '欠载那一瞬不该变成可打断');
+  });
+
+  test('D3 她说话期间掐断音频上行，服务端才没法自己开回合', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    assert.ok(
+      harness.ws.sentTypes().includes('input_audio_buffer.clear'),
+      '必须清掉服务端已经堆起来的音频，否则那一段就够它开一个回合',
+    );
+
+    harness.ws.sent.length = 0;
+    harness.mic.feed(5);
+    assert.equal(
+      harness.ws.framesOf('input_audio_buffer.append').length,
+      0,
+      '她说话期间不能再往上传音频 —— 服务端 VAD 会自己 commit 并在服务端截断她',
+    );
+  });
+
+  test('D3 她说完之后音频上行必须恢复（否则她再也听不见）', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 100 });
+
+    // 她说完了：这一轮结束 + 音频播完。
+    harness.ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    harness.speech.drain();
+
+    harness.ws.sent.length = 0;
+    harness.mic.feed(3);
+    assert.equal(
+      harness.ws.framesOf('input_audio_buffer.append').length,
+      3,
+      '她说完之后必须恢复上行',
+    );
+  });
+
+  test('D3 手动打断（Esc/长按）之后音频上行也要恢复', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    harness.session.interrupt(); // 用户按 Esc
+
+    harness.ws.sent.length = 0;
+    harness.mic.feed(2);
+    assert.equal(
+      harness.ws.framesOf('input_audio_buffer.append').length,
+      2,
+      '打断成功却收不到后续音频 = 「打断了但她再也听不见」',
+    );
+  });
+
+  test('D8 上一轮迟到的 response.done 不能把新一轮判成已结束', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    // 服务端 VAD 在 r1 收尾前自己开了 r2（已实测会发生）。
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r2' } });
+    // 关键：r2 的音频还在预缓冲，环里**还没有**东西 —— 所以播放侧的
+    // `speaking` 是假的，此刻唯一撑着「她在忙」的就是 responseActive。
+    // 必须这么摆，否则 D2 的去抖判据会把这条测试兜住，id 比对是真是假都看不出来。
+    assert.equal(harness.speech.playing, false, '前提：音频还没开始播');
+    const flushesBefore = harness.speech.flushes;
+
+    // r1 的 done 迟到。不对 id 的话它会把 r2 的 responseActive 清零。
+    harness.ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    assert.equal(
+      harness.speech.flushes,
+      flushesBefore,
+      'r2 还在生成，不能因为 r1 的 done 就执行不可逆打断（后果是她这一轮整段不说话）',
+    );
+  });
+});
+
+describe('回归：「ASR 气泡卡住不消失」', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  /** 收集「把用户气泡收掉」的信号：final=true（UI 对 final 一律清空，不看内容）。 */
+  const clearedUserBubble = (events: PetEvent[]) =>
+    events.some((e) => e.type === 'user_transcript' && e.final && e.text === '');
+
+  test('空转写也要发 final —— 否则 delta 推上去的半个字永久留着', () => {
+    const { ws, events } = makeSession();
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '呃' });
+    events.length = 0;
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.completed', transcript: '' });
+    assert.ok(clearedUserBubble(events), '空转写必须把气泡收掉');
+  });
+
+  test('转写失败也要发 final（而不是被当成未知事件丢掉）', () => {
+    const { ws, events } = makeSession();
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '我想问一下' });
+    events.length = 0;
+    ws.deliver({
+      type: 'conversation.item.input_audio_transcription.failed',
+      error: { message: 'asr failed' },
+    });
+    assert.ok(clearedUserBubble(events), 'ASR 失败必须把气泡收掉');
+  });
+
+  test('连接断开要把在途转写清掉（持续聆听下 activity 永不回 idle，这是唯一的清空路径）', () => {
+    const { ws, events } = makeSession();
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '我想问一下' });
+    events.length = 0;
+    ws.fire('close', { code: 1006, reason: '' });
+    assert.ok(clearedUserBubble(events), '断线必须把气泡收掉，否则它再也不会消失');
+  });
+
+  test('D12 delta 字段缺失时忽略这一条，不要把旧文本重放一遍', () => {
+    const { ws, events } = makeSession();
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta', delta: '上一句' });
+    events.length = 0;
+    ws.deliver({ type: 'conversation.item.input_audio_transcription.delta' });
+    assert.equal(
+      events.filter((e) => e.type === 'user_transcript').length,
+      0,
+      'delta 缺失不是「内容没变」，不能拿旧值再 emit 一遍',
+    );
+  });
+
+  test('D7 responseActive 不能跨断线泄漏（否则重连后用户说话界面毫无反应）', () => {
+    const harness = makeSession({ interruptible: false });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.ws.fire('close', { code: 1006, reason: '' });
+
+    // 重连后用户开口：speech_started/stopped 必须被正常处理，不能被
+    // 「她还在说话」的残留状态一起吃掉。
+    const next = FakeWebSocket.instances.at(-1)!;
+    next.open();
+    harness.events.length = 0;
+    next.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    next.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 500 });
+    assert.ok(
+      harness.events.some((e) => e.type === 'activity' && e.value === 'thinking'),
+      '重连后这一轮必须照常走到 thinking，否则用户说完话界面毫无反应',
+    );
+  });
+});
+
+describe('回归：卡在 thinking（永久三点气泡 + 点她不说话）', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  test('连接不可用时 sendText 必须出声报错，而不是悄悄卡在 thinking', () => {
+    const { session, ws, events } = makeSession();
+    ws.readyState = 3; // 连接死了，但 session 还在
+    events.length = 0;
+    session.sendText('你好');
+
+    assert.ok(
+      events.some((e) => e.type === 'error'),
+      '发送失败必须报错 —— 静默丢弃会让用户以为自己没说清楚',
+    );
+    assert.notEqual(
+      lastActivityOf(events),
+      'thinking',
+      '发不出去就不能切到 thinking（出不来）',
+    );
+  });
+
+  test('发送失败会踢一次重连（提示语承诺的「点一下她再试」要真的成立）', () => {
+    const { session, ws } = makeSession();
+    ws.readyState = 3;
+    const before = FakeWebSocket.instances.length;
+    session.sendText('你好');
+    assert.ok(
+      FakeWebSocket.instances.length > before,
+      '必须真的重建连接，否则那句提示是空的',
+    );
+  });
+
+  test('response.cancelled 之后活动状态要落地（它不会再来 response.done）', () => {
+    const { session, ws, events } = makeSession();
+    // 把她摆进「在想」：VAD 收到一句话、服务端开始生成。
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 500 });
+    ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    assert.equal(lastActivityOf(events), 'thinking', '前提：停在 thinking');
+
+    session.interrupt(); // 用户按 Esc
+    events.length = 0;
+    ws.deliver({ type: 'response.cancelled' });
+
+    // **必须是正向断言。** 写成「最后一次 activity 不是 thinking」是没用的：
+    // 漏发事件的时候 events 里一条 activity 都没有，断言对着 undefined
+    // 平凡通过 —— 测试在修复前后都绿。
+    assert.equal(
+      lastActivityOf(events),
+      'idle',
+      'cancelled 之后不会再有 response.done，必须自己把活动状态落地，否则永久停在 thinking',
+    );
+  });
+
+  test('看门狗兜住卡死的 thinking，并且告诉用户', async () => {
+    const { session, ws, events } = makeSession();
+    await session.start(false).catch(() => {});
+    ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+    ws.deliver({ type: 'input_audio_buffer.speech_stopped', audio_end_ms: 500 });
+    assert.equal(lastActivityOf(events), 'thinking', '前提：停在 thinking');
+
+    // 服务端判这段是噪声，不开回合 —— 没有任何事件能把她拉出来。
+    // 把进入 thinking 的时刻拨到过去，等一个看门狗周期（500ms）。
+    (session as unknown as { thinkingSince: number }).thinkingSince = Date.now() - 60_000;
+    events.length = 0;
+    await new Promise((r) => setTimeout(r, 700));
+
+    assert.notEqual(lastActivityOf(events), 'thinking', '看门狗必须把它复位');
+    assert.ok(
+      events.some((e) => e.type === 'error'),
+      '必须告诉用户这一句没被回应 —— 静默复位会让人再说一遍',
+    );
   });
 });

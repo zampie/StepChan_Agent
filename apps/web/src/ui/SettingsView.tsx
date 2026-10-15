@@ -146,7 +146,8 @@ export function SettingsView() {
         </label>
         <p className="hint">
           默认关闭。开着的话，环境噪声和她自己从扬声器出来的声音都可能被当成打断。
-          关闭时想让她停下，按 Esc 或长按她。
+          关闭时想让她停下，长按她就行（Esc 也可以，但只在 Step酱 是当前应用时有效 ——
+          桌宠窗平时不抢键盘焦点）。
         </p>
       </section>
 

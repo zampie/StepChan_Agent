@@ -64,15 +64,22 @@ export class Brain {
 
   /**
    * 持续聆听是否开着。关着的时候只有长按桌宠才采集音频。
-   * 设置还没读到时按默认值（true）算。
+   *
+   * **会话在跑的时候以会话为准**，不以 `this.settings` 为准。两者是同一个事实的
+   * 两个真相源，而且会无声漂移：`this.settings` 会被 `loadSettings()` 顺手刷新
+   * （工具执行器每执行一次工具就刷一次），而会话里的值只有 `setListening()` 能改。
+   * 漂移之后 UI 按「按住说话」处理、会话按「持续聆听」处理 —— 用户按住、说完、
+   * 松手，什么都不会发生，而且两边都不报错。
+   *
+   * 设置还没读到、或者会话没起来时按默认值（true）算。
    */
   get listening(): boolean {
-    return this.settings?.listening ?? true;
+    return this.session?.listening ?? this.settings?.listening ?? true;
   }
 
   /** 语音能不能自动打断她。注意 interrupt() 不受它影响。 */
   get voiceInterruptible(): boolean {
-    return this.settings?.voiceInterruptible ?? false;
+    return this.session?.interruptible ?? this.settings?.voiceInterruptible ?? false;
   }
 
   private async loadSettings(): Promise<Settings> {
