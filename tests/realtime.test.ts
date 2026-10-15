@@ -492,5 +492,116 @@ describe('audio-playback.js：播放 worklet 与打断', () => {
     assert.ok(node.port._out.some((m) => m.data.type === 'overflow'), '溢出必须上报');
     assert.equal(node.process([], [[new Float32Array(128)]]), true);
   });
+
+  // 以下三条守着原速播放这条**唯一**的路径。前两条是从 tests/speech-rate.test.ts
+  // 搬过来的（那个文件整体删掉了，但其中只测原速路径的部分不该跟着没）：
+  // 播放侧的时间伸缩移除之后，这里是「行为没变」的回归基准。
+
+  test('原速路径逐样本原样输出（源采样率 == 输出采样率时不许染色）', () => {
+    const Playback = loadWorklet('audio-playback.js', 24000);
+    const node = new Playback({ processorOptions: { sourceRate: 24000 } });
+    const input = new Int16Array(4096);
+    for (let i = 0; i < input.length; i++) input[i] = Math.round(20000 * Math.sin(i / 7));
+    node.port._in({ type: 'pcm', buffer: input.buffer });
+    const outputs = [[new Float32Array(128)]];
+    for (let q = 0; q < 8; q++) {
+      node.process([], outputs);
+      for (let i = 0; i < 128; i++) {
+        assert.equal(
+          outputs[0][0][i],
+          input[q * 128 + i] / 32768,
+          `原速路径必须逐样本原样输出（第 ${q * 128 + i} 个样本）`,
+        );
+      }
+    }
+  });
+
+  test('完整一轮：排入 PCM → 出声 → started → 播完 → drained', () => {
+    const Playback = loadWorklet('audio-playback.js', 24000);
+    const node = new Playback({ processorOptions: { sourceRate: 24000 } });
+    // 约 170ms 的音频，一次排入。
+    node.port._in({
+      type: 'pcm',
+      buffer: pcm16(4096, (i) => 0.8 * Math.sin((2 * Math.PI * 200 * i) / 24000)),
+    });
+    const types = () => node.port._out.map((m) => m.data.type as string);
+    assert.ok(types().includes('started'), '排入第一块音频就该上报 started');
+    assert.ok(!types().includes('drained'), '还没开始播就不该有 drained');
+
+    const outputs = [[new Float32Array(128)]];
+    let nonSilent = 0;
+    for (let q = 0; q < 64; q++) {
+      outputs[0][0].fill(0);
+      node.process([], outputs);
+      for (const v of outputs[0][0]) if (Math.abs(v) > 0.01) nonSilent++;
+    }
+    assert.ok(nonSilent > 4096 * 0.9, `4096 个样本应当基本都播出来，实测 ${nonSilent} 个`);
+
+    const order = types();
+    const started = order.indexOf('started');
+    const drained = order.indexOf('drained');
+    assert.ok(started >= 0, '必须上报 started');
+    assert.ok(drained > started, `drained 必须在 started 之后：${order.join(',')}`);
+    const levels = node.port._out.filter((m) => m.data.type === 'level');
+    assert.ok(levels.some((m) => (m.data.value as number) > 0.3), '播放期间必须有口型音量');
+    assert.equal(node.process([], outputs), true, '播完之后节点必须继续存活');
+  });
+
+  test('边喂边播（上游 1× 实时、40ms 粒度）：首音一个样本都不多等，流中间不挖洞', () => {
+    // realtime 模型大致按 1× 实时出音，增量粒度实测 20~200ms。原速路径不等任何
+    // 预缓冲 —— 「说完到出声约 0.2 秒」是这个模式唯一的卖点，谁想在这里加垫子
+    // 都会被这条挡下来。空洞数的统计口径是**全静音的 quantum**，也就是用户真的
+    // 听到的断续（句中欠载只少播几个样本，不算听得见的洞）。
+    const sr = 24000;
+    const Playback = loadWorklet('audio-playback.js', sr);
+    const node = new Playback({ processorOptions: { sourceRate: sr } });
+    const outputs = [[new Float32Array(128)]];
+    const chunk = Math.round(sr * 0.04);
+    const total = sr * 2;
+    let produced = 0;
+    let credit = 0;
+    let firstAudioMs: number | null = null;
+    let gaps = 0;
+    let run = 0;
+    let worst = 0;
+    for (let q = 0; q < Math.ceil((sr * 4) / 128); q++) {
+      credit += 128; // 1× 实时
+      while (credit >= chunk && produced < total) {
+        const n = Math.min(chunk, total - produced);
+        const at = produced;
+        node.port._in({
+          type: 'pcm',
+          buffer: pcm16(n, (i) => 0.8 * Math.sin((2 * Math.PI * 200 * (at + i)) / sr)),
+        });
+        produced += n;
+        credit -= chunk;
+      }
+      outputs[0][0].fill(0);
+      node.process([], outputs);
+      let energy = 0;
+      for (const v of outputs[0][0]) energy += v * v;
+      const silent = energy < 1e-12;
+      if (firstAudioMs === null && !silent) firstAudioMs = ((q * 128) / sr) * 1000;
+      // 只数「流还没送完」时的静音 —— 送完之后的静音是正常的句尾。
+      if (firstAudioMs !== null && produced < total) {
+        if (silent) {
+          run++;
+          if (run === 1) gaps++;
+          worst = Math.max(worst, run);
+        } else {
+          run = 0;
+        }
+      }
+    }
+    assert.ok(
+      firstAudioMs !== null && firstAudioMs <= 45,
+      `原速首音应当在 45ms 内（约等于一块增量），实测 ${String(firstAudioMs)}ms`,
+    );
+    assert.equal(
+      gaps,
+      0,
+      `原速播放不该有听得见的空洞，实测 ${gaps} 次（最长 ${(((worst * 128) / sr) * 1000).toFixed(1)}ms）`,
+    );
+  });
 });
 

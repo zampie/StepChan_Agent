@@ -2497,3 +2497,83 @@ describe('回归：turn_start —— 回合边界必须由会话层告诉 UI，�
     assert.ok(typesOf(events).includes('turn_start'));
   });
 });
+
+describe('回归：30 分钟轮换要等她说完，但不能无限等', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  /** 私有的 rotate()，测试里直接驱动（真实触发要等 28.5 分钟）。 */
+  const rotate = (session: RealtimeSession, waitForQuiet = true) =>
+    (session as unknown as { rotate: (w: boolean) => Promise<void> }).rotate(waitForQuiet);
+
+  test('她还在说话时不切，说完才切', async () => {
+    const harness = makeSession();
+    (harness.session as unknown as { started: boolean }).started = true;
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+
+    const done = rotate(harness.session);
+    // **必须等过 4.5 秒**。原来的实现是「固定等 4 秒然后不再复查」，
+    // 只等几百毫秒的话它也还没切，测试在修复前后都绿 —— 等于没测。
+    // 一句长回复（她偶尔会说三四句）超过 4 秒很常见，那正是被切断的现场。
+    await new Promise((r) => setTimeout(r, 4600));
+    assert.equal(
+      harness.ws.closed,
+      null,
+      '她还在说话就不能切会话 —— 原来固定等 4 秒就切，超过 4 秒的回复直接被砍在半句上',
+    );
+
+    // 她说完了（这一轮结束 + 音频播完）。
+    harness.ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    harness.speech.drain();
+    await done;
+    assert.ok(harness.ws.closed, '说完之后应当切掉旧连接');
+    assert.ok(FakeWebSocket.instances.length >= 2, '并且建起新连接');
+  });
+
+  // 注意：这条抓不到「固定等待」那个缺陷（旧实现在 !responseActive 时也立刻返回），
+  // 它钉的是另一个性质 —— 修成轮询之后不能反而引入无条件的等待。
+  test('她没在说话就立刻切，不白等', async () => {
+    const harness = makeSession();
+    (harness.session as unknown as { started: boolean }).started = true;
+    const t0 = Date.now();
+    await rotate(harness.session);
+    assert.ok(
+      Date.now() - t0 < 300,
+      `空闲时不该等（实际等了 ${Date.now() - t0}ms）—— 原来短回复也要白等满 4 秒`,
+    );
+    assert.ok(harness.ws.closed);
+  });
+
+  test('换音色不等她说完 —— 用户点出来的操作要立刻生效', async () => {
+    // setVoice() 也走 rotate()。等她说完在这里是错的：用户在托盘里点了新音色，
+    // 等最长 60 秒没反应只会以为点坏了。宁可把当前这句掐掉。
+    const harness = makeSession();
+    (harness.session as unknown as { started: boolean }).started = true;
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+
+    const t0 = Date.now();
+    await rotate(harness.session, false);
+    assert.ok(
+      Date.now() - t0 < 300,
+      `换音色不该等（实际等了 ${Date.now() - t0}ms）`,
+    );
+    assert.ok(harness.ws.closed, '应当立刻切掉旧连接');
+  });
+
+  test('stop() 之后不再傻等（否则 stop 完还挂着定时器）', async () => {
+    const harness = makeSession();
+    (harness.session as unknown as { started: boolean }).started = true;
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+
+    const done = rotate(harness.session);
+    await harness.session.stop();
+    // 不该挂在那儿等满 60 秒的硬超时。
+    await Promise.race([
+      done,
+      new Promise((_, reject) => setTimeout(() => reject(Error('rotate 在 stop 之后还在等')), 2000)),
+    ]);
+  });
+});

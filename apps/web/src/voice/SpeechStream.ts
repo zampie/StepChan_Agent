@@ -1,14 +1,9 @@
 // 播放侧：base64 PCM16 增量 → AudioWorklet 环形缓冲，支持瞬时 flush。
 //
 // 设计要点见 public/audio-playback.js 顶部注释。这一层只负责：
-// 解 base64、按需重采样信息传给 worklet、暴露 0..1 的音量给口型用、
-// 把语速（播放侧时间伸缩的倍率）同步给 worklet。
+// 解 base64、把源采样率告诉 worklet（由它重采样）、暴露 0..1 的音量给口型用。
 import { REALTIME_SAMPLE_RATE } from '../../../../shared/realtime';
 
-// 刻意**没有**语速控制。曾经做过播放侧 WSOLA 时间伸缩（音高保持得很好），
-// 但 realtime 下加速必须垫住 T·(r−1)/r 的音频才不断续（1.15× 要 480ms），
-// 而上游恰好 1× 实时时加速一点时间都省不下来 —— 省的只是语速，换掉的是开口时机。
-// 用户试过之后判定延迟不可接受，功能整个移除。详见 git 历史。
 export type SpeechStreamEvents = {
   /** 0..1，驱动口型。flush 后立刻变 0。 */
   onLevel?: (level: number) => void;
@@ -27,9 +22,14 @@ export type SpeechStreamEvents = {
 /**
  * 认定「真的播完了」之前要等多久没有新音频。
  *
- * 下界由上游的增量粒度决定：worklet 自己判定「上游说完了」用的是
- * max(150ms, 2×观测到的增量间隔)，而观测间隔上限 300ms —— 所以块间正常静默
- * 最坏能到 300ms 量级。取 350ms 刚好盖住，又不会让她说完之后明显迟钝。
+ * 下界由**上游的增量粒度**决定，这是实测出来的：音频增量按约 200ms 一块到达，
+ * 块间正常静默最坏能到 300ms 量级（偶发的网络抖动更长，但那种该当成卡顿而不是
+ * 「说完了」）。所以 350ms 刚好盖住一次正常的块间间隔，又不会让她说完之后
+ * 明显迟钝。
+ *
+ * 这个数字曾经写成「按 worklet 的 stall 门限推导」—— 那套门限是跟变速功能
+ * 一起进来的，功能移除后它成了只写不读的死代码并被删掉了，所以把依据直接
+ * 记在这里，而不是指向一个已经不存在的实现。
  */
 const DRAIN_GRACE_MS = 350;
 
@@ -57,10 +57,6 @@ export class SpeechStream {
   /** 每次 flush/stop 自增。迟到的 enqueue 用它丢弃。 */
   private epoch = 0;
   private disposed = false;
-  /**
-   * 构造时显式指定了 rate —— 这个实例不跟随全局设置变更。
-   * 给 chat 模式用（服务端已经调过速了，播放侧必须保持 1.0，否则倍率相乘）。
-   */
 
   constructor(private readonly events: SpeechStreamEvents = {}) {}
 

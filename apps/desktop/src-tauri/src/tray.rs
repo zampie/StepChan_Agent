@@ -36,12 +36,17 @@ use crate::settings;
 use crate::window;
 
 /// 音色清单。顺序即菜单顺序。
+///
+/// ⚠️ 必须与 `shared/desktop.ts` 的 `voices` **逐项逐字**一致（id 和中文标签都算）。
+/// 跨语言没法共用一份，所以 `tests/settings-parity.test.ts` 会解析本常量并比对。
+/// 不一致的后果不是报错，而是同一个音色在设置窗里和右键菜单里叫两个名字 ——
+/// 这已经发生过一次（livelybreezy-female 曾是「轻快爽朗」vs「活力轻快」）。
 const VOICES: &[(&str, &str)] = &[
     ("yuanqishaonv", "元气少女"),
     ("jilingshaonv", "机灵少女"),
     ("ruanmengnvsheng", "软萌女声"),
     ("linjiameimei", "邻家妹妹"),
-    ("livelybreezy-female", "轻快爽朗"),
+    ("livelybreezy-female", "活力轻快"),
 ];
 
 /// 桌宠大小。id 用整数百分比（scale_<n>），避免 id 里出现小数点。

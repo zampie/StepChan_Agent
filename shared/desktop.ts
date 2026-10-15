@@ -139,9 +139,29 @@ export const workAreaSchema = z
   .strict();
 export type WorkArea = z.infer<typeof workAreaSchema>;
 
+/**
+ * 音色清单。**这是唯一的真相源**，顺序即菜单顺序。
+ *
+ * 为什么要收到这里：原来设置窗（`ui/SettingsView.tsx`）和托盘菜单
+ * （`src-tauri/src/tray.rs`）各存一份，于是 `livelybreezy-female` 在两处的
+ * 中文标签已经不一致了（「活力轻快」vs「轻快爽朗」）—— 同一个音色在设置里
+ * 和右键菜单里叫两个名字。Rust 那份跨语言没法直接引用，所以用
+ * `tests/settings-parity.test.ts` 解析它的源码逐项比对，漏一个就红。
+ */
+export const voices = [
+  { id: 'yuanqishaonv', label: '元气少女' },
+  { id: 'jilingshaonv', label: '机灵少女' },
+  { id: 'ruanmengnvsheng', label: '软萌女声' },
+  { id: 'linjiameimei', label: '邻家妹妹' },
+  { id: 'livelybreezy-female', label: '活力轻快' },
+] as const satisfies readonly { id: string; label: string }[];
+
 // 用户可改的设置。只存设置，不存聊天内容。
 export const settingsSchema = z
   .object({
+    // 刻意**不**用 z.enum(voices)。服务端支持的音色可能多于我们菜单里列的，
+    // 而 zod 校验失败会让整份设置回落到默认值 —— 用户的选择被静默重置，
+    // 比菜单里少一项糟得多。菜单与托盘的一致性由 parity 测试保证。
     voice: z.string().default('yuanqishaonv'),
     voiceEnabled: z.boolean().default(true),
     // 刻意没有「语速」设置。曾经做过（播放侧 WSOLA 时间伸缩，音高保持得很好），

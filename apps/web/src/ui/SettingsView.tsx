@@ -5,15 +5,10 @@
 import { useEffect, useState } from 'react';
 import { desktop } from '../platform/desktop';
 import { probeMicrophone, type MicProbeResult } from '../platform/micProbe';
-import { defaultSettings, type Settings } from '../../../../shared/desktop';
+import { defaultSettings, voices, type Settings } from '../../../../shared/desktop';
 
-const VOICES = [
-  { id: 'yuanqishaonv', label: '元气少女' },
-  { id: 'jilingshaonv', label: '机灵少女' },
-  { id: 'ruanmengnvsheng', label: '软萌女声' },
-  { id: 'linjiameimei', label: '邻家妹妹' },
-  { id: 'livelybreezy-female', label: '活力轻快' },
-];
+// 音色清单从 shared/desktop.ts 来 —— 这里曾经自己存一份，结果和托盘菜单的
+// 中文标签漂成了两个名字（见 voices 的注释）。
 
 // 隐私开关单独一组，并且写清代价。不把它们和缩放、热键混在一起列。
 const PRIVACY: { key: keyof Settings; label: string; detail: string }[] = [
@@ -111,7 +106,7 @@ export function SettingsView() {
             value={settings.voice}
             onChange={(e) => void update({ voice: e.target.value })}
           >
-            {VOICES.map((v) => (
+            {voices.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.label}
               </option>

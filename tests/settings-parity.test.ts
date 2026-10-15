@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { defaultSettings, settingsSchema } from '../shared/desktop';
+import { defaultSettings, settingsSchema, voices } from '../shared/desktop';
 
 /**
  * 设置的形状有两个真相源：
@@ -84,5 +84,48 @@ test('Rust 的默认值能通过 zod 校验，且与 zod 默认值一致', () =>
     viaZod.data,
     defaultSettings,
     '两边的默认值必须逐字段相同，否则行为会取决于"有没有读到设置"',
+  );
+});
+
+/**
+ * 音色清单同样有两个真相源：
+ *   - TS：`shared/desktop.ts` 的 `voices`（设置窗用）
+ *   - Rust：`apps/desktop/src-tauri/src/tray.rs` 的 `VOICES`（托盘菜单用）
+ *
+ * 跨语言没法共用一份。不一致的后果不是报错，而是**同一个音色在设置窗里和
+ * 右键菜单里叫两个名字** —— 这已经发生过一次（livelybreezy-female 一边是
+ * 「轻快爽朗」一边是「活力轻快」），而且没人会从界面上发现这是个 bug。
+ */
+const trayRs = path.resolve(import.meta.dirname, '../apps/desktop/src-tauri/src/tray.rs');
+
+function rustVoices(): { id: string; label: string }[] {
+  const source = readFileSync(trayRs, 'utf8');
+  const start = source.indexOf('const VOICES');
+  assert.ok(start >= 0, 'tray.rs 里找不到 const VOICES —— 比对失效了，请修这条测试');
+  const open = source.indexOf('&[', start);
+  const close = source.indexOf('];', open);
+  assert.ok(close > open, 'VOICES 没有闭合');
+  const body = source.slice(open, close);
+  const list: { id: string; label: string }[] = [];
+  for (const m of body.matchAll(/\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/g)) {
+    list.push({ id: m[1], label: m[2] });
+  }
+  return list;
+}
+
+test('音色清单：TS 与 Rust 的 id、中文标签、顺序完全一致', () => {
+  // 顺序也要比：顺序即菜单顺序，两边不同会让同一个音色出现在不同位置。
+  assert.deepEqual(
+    rustVoices(),
+    voices.map((v) => ({ id: v.id, label: v.label })),
+    '托盘菜单和设置窗的音色清单必须逐项逐字一致（含顺序）',
+  );
+});
+
+test('默认音色在清单里', () => {
+  // 默认值不在清单里的话，设置窗的下拉框会显示成空白（没有匹配项）。
+  assert.ok(
+    voices.some((v) => v.id === defaultSettings.voice),
+    `默认音色 ${defaultSettings.voice} 不在 voices 清单里`,
   );
 });

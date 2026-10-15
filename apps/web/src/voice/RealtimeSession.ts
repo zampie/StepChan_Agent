@@ -43,6 +43,14 @@ const TOOL_NUDGE_DELAY_MS = 1200;
  */
 const THINKING_TIMEOUT_MS = 10_000;
 /**
+ * 轮换前最多等她说完多久。
+ *
+ * ROTATE_MARGIN_MS 留了 90 秒余量，这里最多吃掉 60 秒，剩 30 秒够重连 + 推摘要。
+ */
+const ROTATE_WAIT_MAX_MS = 60_000;
+/** 等她说完时的轮询间隔。250ms 足够细 —— 切点误差听不出来。 */
+const ROTATE_POLL_MS = 250;
+/**
  * 打断后的「丢弃在途音频」闸门最多开多久。
  *
  * 正常情况它由下一个 `response.created` 解除。但那条事件不是一定会来
@@ -516,7 +524,7 @@ export class RealtimeSession {
       this.sendSessionUpdate(isRotation);
       // 到 30 分钟墙之前主动换会话。
       this.rotateTimer = setTimeout(
-        () => void this.rotate(),
+        () => void this.rotate(true),
         Math.max(10_000, REALTIME_SESSION_LIMIT_MS - ROTATE_MARGIN_MS),
       );
       this.setActivity(this.micWanted ? 'listening' : 'idle');
@@ -655,15 +663,45 @@ export class RealtimeSession {
     this.reconnectTimer = setTimeout(() => void this.connect(true), delay);
   }
 
-  /** 30 分钟墙前的静默重建。用户不应该察觉。 */
-  private async rotate(): Promise<void> {
+  /**
+   * 轮换前等她把话说完。返回时要么安静了，要么等到了硬超时。
+   *
+   * 超时是必须的：30 分钟墙是硬的，而 ROTATE_MARGIN_MS 只留了 90 秒余量。
+   * 宁可切断一句特别长的话，也不能等到会话被服务端掐死 —— 那样连摘要都带不过去。
+   */
+  private async waitUntilQuiet(): Promise<void> {
+    const deadline = Date.now() + ROTATE_WAIT_MAX_MS;
+    while (this.speaking && Date.now() < deadline) {
+      // started 要一起查：等待期间用户可能把语音整个关了（stop()），
+      // 那就没什么要等的了，继续等会让 stop() 后还挂着一个定时器。
+      if (!this.started) return;
+      await new Promise((r) => setTimeout(r, ROTATE_POLL_MS));
+    }
+    if (this.speaking) {
+      reportDiagnostic('rotate: ⚠ 等满超时她还在说，只能切断（30 分钟墙到了）');
+    }
+  }
+
+  /**
+   * 重建会话。
+   *
+   * @param waitForQuiet 要不要先等她把话说完。
+   *   - `true`：30 分钟墙前的静默重建。用户不应该察觉，所以绝不能切在半句上。
+   *   - `false`：用户**明确要求**的重建（换音色）。这时等待是错的 ——
+   *     他在托盘里点了新音色，等一分钟没反应只会以为点坏了。宁可把她当前
+   *     这句掐掉，立刻生效。
+   */
+  private async rotate(waitForQuiet: boolean): Promise<void> {
     if (this.rotating || !this.started) return;
     this.rotating = true;
     try {
-      // 正在说话就等她说完，避免切在半句上。
-      if (this.responseActive) {
-        await new Promise((r) => setTimeout(r, 4000));
-      }
+      // 等她说完再切，避免切在半句上。
+      //
+      // 原来是「如果 responseActive 就固定等 4 秒」然后不再复查 —— 于是超过
+      // 4 秒的回复照样被切断，正是这段等待想避免的事；而短回复又白等满 4 秒。
+      // 改成轮询到真的安静，带硬超时。判据用 `speaking`（含播放侧的尾音），
+      // 不是 responseActive：服务端那边早结束了，环里还压着几秒音频。
+      if (waitForQuiet) await this.waitUntilQuiet();
       this.closedByUs = true;
       this.ws?.close(1000, 'rotate');
       this.ws = null;
@@ -687,7 +725,8 @@ export class RealtimeSession {
       this.sendSessionUpdate(false);
       return;
     }
-    await this.rotate();
+    // 不等她说完：换音色是用户点出来的，立刻生效比不切断更重要。
+    await this.rotate(false);
   }
 
   setInstructions(instructions: string): void {
