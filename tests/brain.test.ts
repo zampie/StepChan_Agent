@@ -2372,3 +2372,65 @@ describe('回归：卡在 thinking（永久三点气泡 + 点她不说话）', (
     );
   });
 });
+
+describe('回归：持续聆听下的长按（此前是死代码，现在默认会走到）', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  // App 侧原来用 `!brain.listening` 门控长按，而 listening 默认 true ——
+  // 于是 beginPushToTalk() 永远不被调用，会话里这条分支从没执行过。
+  // 门控修好之后它成了默认路径，所以必须有测试。
+
+  test('长按让她立刻停下，但不另开一路麦克风', async () => {
+    const harness = makeSession({ listening: true });
+    await harness.session.start(false).catch(() => {});
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    const micStarts = harness.mic.starts;
+    const flushesBefore = harness.speech.flushes;
+
+    await harness.session.beginPushToTalk();
+
+    assert.ok(harness.speech.flushes > flushesBefore, '长按是明确的打断意图，必须止声');
+    assert.equal(
+      harness.mic.starts,
+      micStarts,
+      '持续聆听下麦克风本来就开着，不该再开一路（断句仍交给服务端 VAD）',
+    );
+    assert.equal(harness.session.pushToTalkActive, false, '连续模式下长按只是个手势');
+  });
+
+  test('松手是安全的空操作，不会提交空缓冲（服务端会为此回两个错）', async () => {
+    const harness = makeSession({ listening: true });
+    await harness.session.start(false).catch(() => {});
+    await harness.session.beginPushToTalk();
+    harness.ws.sent.length = 0;
+
+    harness.session.endPushToTalk();
+
+    assert.equal(
+      harness.ws.sentTypes().includes('input_audio_buffer.commit'),
+      false,
+      '连续模式下松手不该 commit —— 断句是服务端 VAD 的事',
+    );
+  });
+
+  test('长按打断之后音频上行要恢复（否则打断了却再也听不见）', async () => {
+    const harness = makeSession({ listening: true, interruptible: false });
+    await harness.session.start(false).catch(() => {});
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    // 她说话期间环境噪声触发了 VAD → 上行被掐断。
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    await harness.session.beginPushToTalk(); // 用户长按插话
+
+    harness.ws.sent.length = 0;
+    harness.mic.feed(3);
+    assert.equal(
+      harness.ws.framesOf('input_audio_buffer.append').length,
+      3,
+      '长按后说的话必须传得上去',
+    );
+  });
+});
