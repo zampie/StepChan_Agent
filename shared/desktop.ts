@@ -40,6 +40,8 @@ export const desktopEvents = {
   trayCommand: 'pet://tray-command',
   hotkey: 'pet://hotkey',
   dragDrop: 'pet://drag-drop',
+  /** 设置变更广播。两个窗口各自缓存设置，靠它保持一致。 */
+  settingsChanged: 'pet://settings-changed',
 } as const;
 
 export const credentialsSchema = z
@@ -152,10 +154,14 @@ export const settingsSchema = z
      *   `speech_rate` / `output_audio_speed` 全被静默忽略，在 instructions 里
      *   要求"语速加快"也完全无效（时长一字不差，甚至更长）。所以只能在播放侧
      *   做保持音高的时间伸缩。
-     * 默认 1.15：默认档就比原速快一点（用户反馈原速"显得憨憨的"），
-     * 但不到会让时间伸缩出现可听瑕疵的程度。
+     * **默认 1.0（原速）。** 曾经默认 1.15，但那让所有人都走上时间伸缩路径
+     * （1.0 是唯一走旁路、一个样本都不处理的档），用户随即报告播放断续。
+     * realtime 模式下这是根本性的：模型大致按实时出音，按 1.15× 消耗就需要
+     * 比服务端提供的高 15% 的数据率，环必然被抽干。
+     * 所以默认回原速；想加快的用户可以自己调，代价是首音多等一段预缓冲。
+     * chat 模式是服务端调速，没有这个问题。
      */
-    speechRate: z.number().min(0.8).max(1.8).default(1.15),
+    speechRate: z.number().min(0.8).max(1.8).default(1.0),
     /** 持续聆听。关掉之后只能长按桌宠说话（按住说、松手发）。 */
     listening: z.boolean().default(true),
     /**
@@ -238,4 +244,6 @@ export type Desktop = {
   onDragDrop(handler: (payload: DragDropPayload) => void): () => void;
   onFrontmostChanged(handler: (app: FrontmostApp) => void): () => void;
   onHitTest(handler: (part: string | null) => void): () => void;
+  /** 任一窗口改了设置都会收到。返回取消订阅函数。 */
+  onSettingsChanged(handler: (settings: Settings) => void): () => void;
 };

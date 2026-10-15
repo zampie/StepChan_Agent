@@ -1,10 +1,13 @@
 // 设置：只存用户偏好（音色、各项感知开关、缩放、热键），不存聊天内容或录音。
 // 形状必须与 shared/desktop.ts 的 settingsSchema 一致。
 use serde_json::{json, Value};
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_store::StoreExt;
 
 const STORE: &str = "settings.json";
+
+/// 设置变更广播。必须与 shared/desktop.ts 的 desktopEvents.settingsChanged 一致。
+pub const SETTINGS_CHANGED: &str = "pet://settings-changed";
 
 /// 设置的默认值**兼白名单**：`settings_set` 只接受这里出现过的键。
 ///
@@ -17,7 +20,7 @@ fn defaults() -> Value {
     json!({
         "voice": "yuanqishaonv",
         "voiceEnabled": true,
-        "speechRate": 1.15,
+        "speechRate": 1.0,
         "listening": true,
         "voiceInterruptible": false,
         "brainMode": "realtime",
@@ -71,5 +74,9 @@ pub fn settings_set<R: Runtime>(app: AppHandle<R>, patch: Value) -> Result<Value
     let store = app.store(STORE).map_err(|e| e.to_string())?;
     store.set("settings", current.clone());
     store.save().map_err(|e| e.to_string())?;
+    // 广播给**所有**窗口。桌宠窗和设置窗各自缓存了一份设置，
+    // 不广播的话从一边改完另一边还显示旧值 —— 用户看到的是
+    // 「右键菜单和设置里的同一个开关状态不一样」。
+    let _ = app.emit(SETTINGS_CHANGED, current.clone());
     Ok(current)
 }

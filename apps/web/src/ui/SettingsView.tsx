@@ -4,6 +4,7 @@
 // 菜单项的一行文字放不下。默认值与 shared/desktop.ts 的 settingsSchema 一致。
 import { useEffect, useState } from 'react';
 import { desktop } from '../platform/desktop';
+import { probeMicrophone, type MicProbeResult } from '../platform/micProbe';
 import { defaultSettings, type Settings } from '../../../../shared/desktop';
 
 const VOICES = [
@@ -43,6 +44,12 @@ export function SettingsView() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [screenPermission, setScreenPermission] = useState<string>('unknown');
   const [error, setError] = useState<string | null>(null);
+  const [mic, setMic] = useState<MicProbeResult | null>(null);
+  const [micRunning, setMicRunning] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<Awaited<
+    ReturnType<typeof desktop.credentialsStatus>
+  >>(null);
+  const [keyDraft, setKeyDraft] = useState('');
 
   useEffect(() => {
     void desktop
@@ -50,6 +57,22 @@ export function SettingsView() {
       .then(setSettings)
       .catch(() => setError('读取设置失败。'));
     void desktop.screenPermission().then(setScreenPermission);
+    void desktop.credentialsStatus().then(setKeyStatus).catch(() => {});
+  }, []);
+
+  const runMicProbe = async () => {
+    setMicRunning(true);
+    try {
+      setMic(await probeMicrophone());
+    } finally {
+      setMicRunning(false);
+    }
+  };
+
+  // 桌宠窗和设置窗是两个独立的 webview，各自缓存一份设置。不订阅广播的话，
+  // 从右键菜单改完开关，开着的设置窗还显示旧值（用户报过「两边不同步」）。
+  useEffect(() => {
+    return desktop.onSettingsChanged(setSettings);
   }, []);
 
   const update = async (patch: Partial<Settings>) => {
@@ -109,13 +132,25 @@ export function SettingsView() {
           />
           <span className="value">{settings.speechRate.toFixed(2)}×</span>
         </label>
-        {/* 两个模式的实现完全不同，而且差异是用户能听出来的，所以这里讲清楚。 */}
+        {/* 两个模式的实现完全不同，而且差异是用户能听出来的（一个免费、一个要
+            拿首音延迟换），所以这里必须讲清楚，不能只写一句"调语速"。 */}
         <p className="hint">
-          默认 1.15 倍 —— 模型原速听着有点慢。两个模式调速的方式不一样：
-          <strong>聪明优先</strong>是让服务端直接按这个倍率合成（下一句生效）；
-          <strong>反应优先</strong>的服务端不支持调速，是在播放时做保持音高的变速处理，
-          立刻生效。1.4 倍以内基本听不出来，再往上（尤其 1.6+）可能听到轻微的沙沙感
-          或接缝。想完全不处理就把它拖回 1.00 倍。
+          默认 <strong>1.00 倍</strong>（模型原速）。两个模式调速的方式完全不一样：
+        </p>
+        <p className="hint">
+          <strong>聪明优先</strong>——服务端直接按这个倍率合成，拿到的声音本身就是
+          加速过的，所以<strong>没有任何代价</strong>，音质和延迟都不受影响（下一句生效）。
+        </p>
+        <p className="hint">
+          <strong>反应优先</strong>——服务端不支持调速，只能在播放时做保持音高的变速。
+          而这个模型是按<strong>实时速度</strong>出音的：要以 1.15 倍播，就得比声音到达
+          更快地消耗它，所以必须先攒一小段再开口。选 1.15 倍以上时，她
+          <strong>从说完到出声会从约 0.2 秒变成约 0.65 秒</strong>，而且很长的句子后半段
+          会慢慢回落到原速（这是为了不出现断续的卡顿）。立刻生效。
+        </p>
+        <p className="hint">
+          所以：想要低延迟就留在 1.00 倍；只是觉得她说得慢、不在乎多等半秒，再往上调。
+          1.4 倍以内音质基本听不出处理痕迹，1.6 倍以上可能听到轻微的沙沙感或接缝。
         </p>
       </section>
 
@@ -144,6 +179,68 @@ export function SettingsView() {
         <p className="hint">
           默认关闭。开着的话，环境噪声和她自己从扬声器出来的声音都可能被当成打断。
           关闭时想让她停下，按 Esc 或长按她。
+        </p>
+      </section>
+
+      <section>
+        <h2>麦克风</h2>
+        <p className="hint">
+          麦克风出问题时的症状和「语音开关关着」「授权过期」「被别的应用占用」
+          完全一样 —— 按住、说完、松手，什么都没发生。这个自检会把断在哪一步说清楚。
+        </p>
+        <button type="button" onClick={() => void runMicProbe()} disabled={micRunning}>
+          {micRunning ? '检查中…' : '检查麦克风'}
+        </button>
+        {mic && (
+          <div className="probe">
+            {mic.steps.map((step) => (
+              <div key={step.label} className={step.ok ? 'probe-ok' : 'probe-bad'}>
+                {step.ok ? '✓' : '✗'} {step.label}：{step.detail}
+              </div>
+            ))}
+            <p className="hint">{mic.advice}</p>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h2>API Key</h2>
+        {keyStatus?.configured ? (
+          <p className="hint">
+            已配置（{keyStatus.fingerprint}），来自 {keyStatus.source || '环境变量'}。
+          </p>
+        ) : (
+          <p className="settings-warn">还没有 key，她没法说话也没法思考。</p>
+        )}
+        <label className="row">
+          <input
+            type="password"
+            placeholder="粘贴 StepFun API key"
+            value={keyDraft}
+            onChange={(e) => setKeyDraft(e.target.value)}
+          />
+          <button
+            type="button"
+            disabled={!keyDraft.trim()}
+            onClick={() => {
+              void desktop
+                .setApiKey(keyDraft.trim())
+                .then((status) => {
+                  setKeyStatus(status);
+                  setKeyDraft('');
+                  setError(null);
+                })
+                .catch((e: unknown) =>
+                  setError(e instanceof Error ? e.message : '保存 key 失败。'),
+                );
+            }}
+          >
+            保存
+          </button>
+        </label>
+        <p className="hint">
+          会写进 {keyStatus?.userPath || '~/.stepchan/.env'}（仅本人可读），立即生效不用重启。
+          界面只会显示指纹，不会显示完整 key。
         </p>
       </section>
 
@@ -200,7 +297,14 @@ export function SettingsView() {
             max={120}
             step={1}
             value={settings.sleepAfterMinutes}
-            onChange={(e) => void update({ sleepAfterMinutes: Number(e.target.value) })}
+            onChange={(e) => {
+              // 清空字段时 Number('') 是 0，直接存下去就变成「永不睡」；
+              // 非法输入是 NaN，会被 zod 的 min(0) 拒掉并弹"保存失败"。
+              // 两种都不是用户的意图，所以只在拿到有效数字时才保存。
+              const next = Number(e.target.value);
+              if (e.target.value === '' || !Number.isFinite(next)) return;
+              void update({ sleepAfterMinutes: Math.round(next) });
+            }}
           />
           <span className="value">分钟</span>
         </label>

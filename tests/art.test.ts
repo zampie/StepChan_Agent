@@ -12,6 +12,7 @@ import {
   logoSlots,
   parseLogoManifest,
   parsePoseRegions,
+  sleepFeel,
 } from '../apps/web/src/pet';
 
 import {
@@ -344,6 +345,22 @@ test('tools/art 的 alpha / chroma helper 合成输入自测', (t) => {
   const r = spawnSync(py, [path.join(root, 'tools/art/selftest.py')], { encoding: 'utf8' });
   assert.equal(r.status, 0, `tools/art/selftest.py 失败：\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stdout, /0 条失败/, `自测输出不符合预期：\n${r.stdout}`);
+});
+
+// qa_sheet.py 的 sleep_sheet() 是**复刻**渲染器的 zzz 几何来画图的（和 place_logo 一样）。
+// 复刻的常量一旦和 sleepFeel 漂开，那张 QA 图就在说谎 —— 人眼看到的位置不是运行期的位置。
+// 所以把这几个数对一遍。
+test('_qa_sleep.png 复刻的 zzz 几何常量和 sleepFeel 一致', () => {
+  const src = readFileSync(path.join(root, 'tools/art/qa_sheet.py'), 'utf8');
+  const num = (name: string) => {
+    const m = new RegExp(`^${name} = ([0-9.]+)`, 'm').exec(src);
+    assert.ok(m, `qa_sheet.py 里找不到 ${name}`);
+    return Number(m[1]);
+  };
+  assert.equal(num('SLEEP_ZZZ_SIZE'), sleepFeel.zzzSize);
+  assert.equal(num('SLEEP_ZZZ_GAP'), sleepFeel.zzzGap);
+  assert.equal(num('SLEEP_MARK_ALPHA'), sleepFeel.markAlpha);
+  assert.equal(num('SLEEP_FX_LIFE_MS'), 1400, 'FX 生命周期和 RigRenderer 的 FX_LIFE_MS 不一致');
 });
 
 // ---------------------------------------------------------------------------

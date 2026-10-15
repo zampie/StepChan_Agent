@@ -94,6 +94,7 @@ function browserFallback(): Desktop {
     onDragDrop: noop,
     onFrontmostChanged: noop,
     onHitTest: noop,
+    onSettingsChanged: noop,
   };
 }
 
@@ -209,6 +210,13 @@ function tauriDesktop(): Desktop {
     },
     onHitTest(handler) {
       return listen<string | null>(desktopEvents.hitTest, handler);
+    },
+    onSettingsChanged(handler) {
+      return listen<unknown>(desktopEvents.settingsChanged, (payload) => {
+        // 广播来自 Rust，形状应当已经对；但解析失败不该让订阅者收到脏数据。
+        const parsed = settingsSchema.safeParse(payload);
+        if (parsed.success) handler(parsed.data);
+      });
     },
   };
 }

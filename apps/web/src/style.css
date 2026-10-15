@@ -329,6 +329,53 @@ body {
   -webkit-text-fill-color: #1b2430;
 }
 
+.probe {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(20, 182, 197, 0.08);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.probe-ok {
+  color: #1c7a5e;
+}
+
+.probe-bad {
+  color: #c0453d;
+  font-weight: 500;
+}
+
+.settings button {
+  padding: 5px 12px;
+  border: 1px solid #c7d3de;
+  border-radius: 8px;
+  background: #fff;
+  color: #1b2430;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings input[type='password'] {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid #c7d3de;
+  border-radius: 7px;
+  background: #fff;
+  color: #1b2430;
+  -webkit-text-fill-color: #1b2430;
+  font: inherit;
+  font-size: 12px;
+}
+
 .settings-warn {
   margin: 0 0 10px;
   padding: 8px 10px;
@@ -376,8 +423,71 @@ body {
   .value {
     color: #93a3b2;
   }
-  .settings-warn {
+  .probe {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(20, 182, 197, 0.08);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.probe-ok {
+  color: #1c7a5e;
+}
+
+.probe-bad {
+  color: #c0453d;
+  font-weight: 500;
+}
+
+.settings button {
+  padding: 5px 12px;
+  border: 1px solid #c7d3de;
+  border-radius: 8px;
+  background: #fff;
+  color: #1b2430;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings input[type='password'] {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid #c7d3de;
+  border-radius: 7px;
+  background: #fff;
+  color: #1b2430;
+  -webkit-text-fill-color: #1b2430;
+  font: inherit;
+  font-size: 12px;
+}
+
+.settings-warn {
     background: #4a3a1e;
+  }
+  .probe {
+    background: rgba(20, 182, 197, 0.14);
+  }
+  .probe-ok {
+    color: #6fd3b0;
+  }
+  .probe-bad {
+    color: #ff938c;
+  }
+  .settings button,
+  .settings input[type='password'] {
+    border-color: #3c4854;
+    background: #232c35;
+    color: #e8eff5;
+    -webkit-text-fill-color: #e8eff5;
   }
   .settings select {
     border-color: #3c4854;

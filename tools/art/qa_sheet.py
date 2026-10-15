@@ -224,6 +224,7 @@ def main() -> int:
 
     logo_sheet()
     hit_sheet()
+    sleep_sheet()
     return 0
 
 
@@ -414,6 +415,156 @@ def logo_sheet() -> None:
     ]
     sheet = stack(parts)
     out = ASSETS / "_qa_logo.png"
+    sheet.save(out)
+    print(f"wrote {out} {sheet.size}")
+
+
+# 睡觉的 zzz 几何。**这些数必须和 apps/web/src/pet/sleep.ts 的 sleepFeel 一致**
+# —— 这张 QA 图的全部意义就是「运行期算出来的位置对不对」，复刻错了就什么都没验证。
+SLEEP_ZZZ_SIZE = 0.22  # sleepFeel.zzzSize，单位＝画布高度
+SLEEP_ZZZ_GAP = 0.03  # sleepFeel.zzzGap
+SLEEP_FX_LIFE_MS = 1400  # RigRenderer 的 FX_LIFE_MS
+SLEEP_MARK_ALPHA = 0.85  # sleepFeel.markAlpha（reduceMotion 下那枚常驻静态 zzz）
+
+
+def _ease_in_out(t: float) -> float:
+    x = min(1.0, max(0.0, t))
+    return 2 * x * x if x < 0.5 else 1 - (-2 * x + 2) ** 2 / 2
+
+
+def _fx_pose(age_ms: float) -> tuple[float, float, float]:
+    """motion.ts 的 fxPose 的复刻：返回 (scale, dy_px, alpha)。"""
+    t = min(1.0, age_ms / SLEEP_FX_LIFE_MS)
+    pop = _ease_in_out(t / 0.18) if t < 0.18 else 1.0
+    scale = 0.55 + pop * 0.45 + (math.sin(t / 0.3 * math.pi) * 0.12 if t < 0.3 else 0.0)
+    alpha = t / 0.1 if t < 0.1 else (1 - (t - 0.65) / 0.35 if t > 0.65 else 1.0)
+    return scale, -46 * _ease_in_out(t), alpha
+
+
+def _zzz_spawn(regions: list[dict]) -> tuple[float, float]:
+    """sleep.ts 的 zzzSpawn 的复刻：返回 (x 从中心算, y 从脚底往上算)，单位＝画布高度。"""
+    head = next((r for r in regions if r["part"] == "head"), None)
+    if head is None:
+        head = next((r for r in regions if r["part"] == "body"), regions[0])
+    half = SLEEP_ZZZ_SIZE / 2
+    return (
+        (head["x0"] + head["x1"]) / 2 - 0.5,
+        min((1 - head["y0"]) + half + SLEEP_ZZZ_GAP, 1 - half),
+    )
+
+
+def _paste_zzz(
+    canvas: Image.Image, zzz: Image.Image, manifest: dict, pos: tuple[float, float],
+    scale: float, dy: float, alpha: float,
+) -> None:
+    """按运行期的那套换算把一枚 zzz 贴到画布上（anchor 在中心）。"""
+    cv = manifest["canvas"]
+    anchor = manifest["anchor"]
+    h = cv["height"]
+    side = max(1, int(round(h * SLEEP_ZZZ_SIZE * scale)))
+    im = zzz.resize((side, side), Image.LANCZOS)
+    if alpha < 1:
+        a = im.getchannel("A").point(lambda v: int(v * max(0.0, min(1.0, alpha))))
+        im.putalpha(a)
+    cx = cv["width"] * anchor["x"] + pos[0] * h
+    cy = h * anchor["y"] - pos[1] * h + dy
+    canvas.alpha_composite(im, (round(cx - side / 2), round(cy - side / 2)))
+
+
+def sleep_sheet() -> None:
+    """睡觉状态 + zzz 动效的 QA 图。
+
+    要人眼复核三件事：
+      1. zzz 冒在**侧躺的头顶**上方，而不是站立那个写死的位置（那会落在腰上方的空气里）；
+      2. zzz 不压在头发上、也不被画布上边切掉；
+      3. 220 px 下还认得出是「zzz」—— 这是实际显示尺寸，在 512 上好看不算过关。
+
+    第一段是生命周期的四个取样（刚弹出 → 上浮 → 淡出），**叠在一张图上**看轨迹；
+    第二段是 reduceMotion 下那枚常驻静态 zzz；
+    第三段把头部命中区框也画出来，用来确认「头顶之上」这件事不是目测。
+    """
+    manifest = json.loads((ASSETS / "rig.json").read_text())
+    hits = ASSETS / "hitregions.json"
+    if not hits.exists():
+        print("!! 没有 hitregions.json，跳过 _qa_sleep.png（先跑 tools/art/regions.py）")
+        return
+    regions = json.loads(hits.read_text())["poses"]["sleep"]
+    body = load(manifest, manifest["actions"]["sleep"]["file"])
+    zzz = load(manifest, manifest["fx"]["zzz"]["file"])
+    pos = _zzz_spawn(regions)
+    f = font(11)
+
+    # 生命周期取样点（ms）。0 是刚生成那一帧，1300 已经快淡完。
+    samples = [60, 320, 700, 1150]
+
+    def trail() -> Image.Image:
+        out = body.copy()
+        for age in samples:
+            scale, dy, alpha = _fx_pose(age)
+            _paste_zzz(out, zzz, manifest, pos, scale, dy, alpha)
+        return out
+
+    def single(age: float) -> Image.Image:
+        out = body.copy()
+        scale, dy, alpha = _fx_pose(age)
+        _paste_zzz(out, zzz, manifest, pos, scale, dy, alpha)
+        return out
+
+    def static_mark() -> Image.Image:
+        out = body.copy()
+        _paste_zzz(out, zzz, manifest, pos, 1.0, 0.0, SLEEP_MARK_ALPHA)
+        return out
+
+    def annotated() -> Image.Image:
+        out = Image.new("RGBA", body.size, (255, 255, 255, 255))
+        out.alpha_composite(body)
+        _paste_zzz(out, zzz, manifest, pos, 1.0, 0.0, 1.0)
+        d = ImageDraw.Draw(out)
+        for r in regions:
+            if r["part"] not in ("head", "body"):
+                continue
+            c = HIT_COLORS[r["part"]]
+            box = (
+                r["x0"] * body.width,
+                r["y0"] * body.height,
+                r["x1"] * body.width,
+                r["y1"] * body.height,
+            )
+            d.rectangle(box, outline=c, width=3)
+            d.text((box[0] + 3, box[1] + 1), r["part"], fill=c, font=f)
+        # zzz 的外接框：它的下边必须在 head 框的上边之上。
+        h = manifest["canvas"]["height"]
+        side = h * SLEEP_ZZZ_SIZE
+        cx = manifest["canvas"]["width"] * manifest["anchor"]["x"] + pos[0] * h
+        cy = h * manifest["anchor"]["y"] - pos[1] * h
+        d.rectangle(
+            (cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2),
+            outline=(20, 160, 160, 255),
+            width=3,
+        )
+        return out
+
+    life = [(f"{a}ms", single(a)) for a in samples]
+    tiles = [("trail (all 4)", trail()), *life]
+    width = PAD + len(tiles) * (TILE + PAD)
+    parts = [
+        strip({}, tiles, LIGHT, "sleep + zzz lifecycle @220 / light", tile=TILE, min_width=width),
+        strip({}, tiles, DARK, "same / dark", tile=TILE, min_width=width),
+        strip(
+            {},
+            [
+                ("reduceMotion", static_mark()),
+                ("geometry check", annotated()),
+                ("pose only", body.copy()),
+            ],
+            LIGHT,
+            "reduceMotion = one persistent static zzz  |  teal box = zzz bounds, must sit above the blue head box",
+            tile=320,
+            min_width=width,
+        ),
+    ]
+    sheet = stack(parts)
+    out = ASSETS / "_qa_sleep.png"
     sheet.save(out)
     print(f"wrote {out} {sheet.size}")
 

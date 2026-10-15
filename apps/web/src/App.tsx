@@ -220,8 +220,10 @@ export function App() {
           setNotice(noticeText(intent.privacy, ''));
           window.setTimeout(() => setNotice(null), 4000);
         }
-        if (intent.kind === 'nap') rigRef.current?.playAction('sleep');
-        if (intent.kind === 'wake') rigRef.current?.playAction('idle');
+        // 睡觉是**状态**不是一次性动作：只 playAction('sleep') 的话闲置摇摆和
+        // 动作自动回位会把她顶起来，而且醒不过来（wake 得有对应的出口）。
+        if (intent.kind === 'nap') rigRef.current?.setSleeping(true);
+        if (intent.kind === 'wake') rigRef.current?.setSleeping(false);
         void brainRef.current?.sendText(intent.prompt).catch(() => {});
       },
     });
@@ -232,6 +234,16 @@ export function App() {
       awareness.stop();
     };
   }, []);
+
+  // ---- 设置的跨窗口同步 ----
+  // 设置窗是另一个 webview，它改了设置这边不会自动知道（反之亦然）。
+  // 用户看到的症状是「右键菜单和设置里同一个开关状态不一样」。
+  useEffect(() => {
+    return desktop.onSettingsChanged((next) => {
+      setSettings(next);
+      applyAppearance(next);
+    });
+  }, [applyAppearance]);
 
   // Rust 的命中轮询只用来**记录**光标压在哪个部位；反应由单击触发。
   //
@@ -414,6 +426,9 @@ export function App() {
       const isSecondOfDouble = now - lastTapAt.current < TAP_DEDUPE_MS;
       lastTapAt.current = now;
       awarenessRef.current?.notifyInteraction();
+      // 点一下就该醒。awareness 的 wake 意图会走模型（要等回复），
+      // 但视觉上必须立刻醒，否则点了还躺着像卡住。
+      rigRef.current?.setSleeping(false);
       // 双击的第二下不再换表情（见 TAP_DEDUPE_MS）。
       if (!isSecondOfDouble) {
         // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
@@ -501,6 +516,11 @@ export function App() {
           void popupPetMenu(settings, {
             onType: openComposer,
             onPatchSettings: applySettingsPatch,
+            onToggleSleep: (next) => {
+              rigRef.current?.setSleeping(next);
+              // 主动叫醒也算一次互动，否则空闲计时还在跑、马上又会自己睡回去。
+              if (!next) awarenessRef.current?.notifyInteraction();
+            },
             onOpenSettings: () => void desktop.openSettings().catch(() => {}),
             onMoveAside: () => {
               // 用户显式触发的位移才允许；模型没有这个工具（见 shared/brain.ts 头部）。
@@ -508,7 +528,7 @@ export function App() {
               void desktop.moveToSpot('bottom_right').catch(() => {});
             },
             onQuit: () => void desktop.quit().catch(() => {}),
-          }).then((shown) => {
+          }, rigRef.current?.sleeping ?? false).then((shown) => {
             // 原生菜单起不来时退回直接开输入框，不要让右键变成「什么都没发生」。
             if (!shown) openComposer();
           });

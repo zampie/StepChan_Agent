@@ -167,6 +167,7 @@ function fakeDesktop(options: FakeDesktopOptions = {}) {
     onDragDrop: () => () => {},
     onFrontmostChanged: () => () => {},
     onHitTest: () => () => {},
+    onSettingsChanged: () => () => {},
   };
   return { desktop, calls, getSettings: () => settings };
 }

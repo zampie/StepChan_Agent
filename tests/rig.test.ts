@@ -1,13 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { Texture, TextureSource } from 'pixi.js';
 import {
   BlinkScheduler,
+  BreathPhase,
   HoldTimer,
+  RigRenderer,
   ShuffleBag,
   Spring,
   VisemeTracker,
+  ZzzEmitter,
   audioVisemeLadder,
+  awakeBreath,
   breathe,
+  breatheAt,
   crossfadeMs,
   easeInOut,
   fullBodyFallback,
@@ -16,10 +24,14 @@ import {
   listenPose,
   logoUrlFor,
   minHoldMs,
+  parseLogoManifest,
   parsePoseRegions,
   poseRegionsUrlFor,
   resolveBaseUrl,
   silenceFloor,
+  sleepExpression,
+  sleepFeel,
+  sleepPose,
   squash,
   sway,
   tapActionHoldMs,
@@ -27,6 +39,8 @@ import {
   tapPools,
   tapTargetOf,
   tapTargets,
+  zzzSpawn,
+  type LoadedRig,
   type PoseRegion,
   type TapReaction,
 } from '../apps/web/src/pet';
@@ -35,10 +49,29 @@ import {
   actions,
   expressions,
   fxNames,
+  rigManifestSchema,
   touchParts,
+  type ActionName,
   type EyeState,
+  type RigManifest,
   type Viseme,
 } from '../shared/pet';
+
+// ---------------------------------------------------------------------------
+// 真实清单。睡觉/zzz 的位置是从**实测的逐姿势几何**算出来的，
+// 所以这里读真的 rig.json / hitregions.json / logo.json，不造假数据 ——
+// 造出来的「头部框」没法暴露「zzz 冒在腰上方的空气里」这种错。
+// ---------------------------------------------------------------------------
+const rigDir = path.resolve(import.meta.dirname, '../assets/stepchan_q_v1');
+const realManifest: RigManifest = rigManifestSchema.parse(
+  JSON.parse(readFileSync(path.join(rigDir, 'rig.json'), 'utf8')),
+);
+const realRegions = parsePoseRegions(
+  JSON.parse(readFileSync(path.join(rigDir, 'hitregions.json'), 'utf8')),
+);
+const realLogo = parseLogoManifest(
+  JSON.parse(readFileSync(path.join(rigDir, 'logo.json'), 'utf8')),
+);
 
 // ---------------------------------------------------------------------------
 // 口型映射。这是整条语音链路里唯一「主观感受」能被量化成单测的地方：
@@ -347,6 +380,199 @@ test('reduceMotion 下聆听退化为静态：姿势与标记都在，但不随�
 });
 
 // ---------------------------------------------------------------------------
+// 睡觉：持续状态的数学与节拍
+//
+// 同样地，Pixi 跑不起来 → **手感（躺下的过渡、zzz 飘起来好不好看）未经验证**。
+// 这里验证的是「睡觉是状态不是动作」在数学上的那几条：醒着时完全中性、
+// 睡着时呼吸更慢更浅、摇摆被按到 0、reduceMotion 下仍有一枚常驻 zzz。
+// 渲染器那一侧（姿势保持、zzz 真的周期性生成、命中区切到 sleep）在文件末尾另有一组。
+// ---------------------------------------------------------------------------
+
+test('醒着时睡觉姿态完全中性（呼吸就是清醒那套，摇摆照常，没有标记）', () => {
+  const p = sleepPose(0);
+  assert.equal(p.breathAmplitude, awakeBreath.amplitude);
+  assert.equal(p.breathPeriodMs, awakeBreath.periodMs);
+  assert.equal(p.swayScale, 1, '醒着时闲置摇摆必须照常');
+  assert.equal(p.markAlpha, 0);
+});
+
+test('睡着时呼吸更慢更浅，而且仍然在呼吸 —— 不是把呼吸关掉', () => {
+  const p = sleepPose(1);
+  assert.ok(
+    p.breathPeriodMs > awakeBreath.periodMs,
+    `睡着的周期 ${p.breathPeriodMs}ms 不比清醒的 ${awakeBreath.periodMs}ms 长`,
+  );
+  assert.ok(p.breathAmplitude < awakeBreath.amplitude, '睡着的呼吸幅度没有变浅');
+  assert.ok(p.breathAmplitude > 0, '呼吸被关掉了 —— 那看起来像死了，不是睡着了');
+  // 换算成「次/分」看一眼是否落在生理范围：清醒静息 12–20，睡眠 10–16。
+  const perMin = 60000 / p.breathPeriodMs;
+  assert.ok(perMin >= 9 && perMin <= 16, `睡着时 ${perMin.toFixed(1)} 次/分，不像在睡觉`);
+  assert.equal(p.swayScale, 0, '睡着时还在左右摇 —— 侧躺的人摇起来像在抽搐');
+});
+
+test('睡觉的进入/退出是插值的，越界被夹住', () => {
+  const half = sleepPose(0.5);
+  assert.ok(Math.abs(half.breathPeriodMs - (awakeBreath.periodMs + sleepFeel.breathPeriodMs) / 2) < 1e-9);
+  assert.ok(Math.abs(half.swayScale - 0.5) < 1e-9, '摇摆没按 amount 渐隐');
+  assert.deepEqual(sleepPose(9), sleepPose(1));
+  assert.deepEqual(sleepPose(-3), sleepPose(0));
+});
+
+test('reduceMotion 下睡觉有一枚常驻静态 zzz —— 不是完全没有', () => {
+  const r = sleepPose(1, false);
+  assert.ok(r.markAlpha > 0.3, `reduceMotion 下 zzz 透明度只有 ${r.markAlpha}，看不出她在睡`);
+  // 正常模式下这枚不显示：那时 zzz 是周期性生成的 FX，两者互斥，否则会有两个 zzz。
+  assert.equal(sleepPose(1, true).markAlpha, 0, '正常模式下静态标记应当让位给周期性 zzz');
+  // 乘在 amount 上，所以叫醒她的时候是淡出而不是突然不见。
+  assert.ok(Math.abs(sleepPose(0.5, false).markAlpha - r.markAlpha / 2) < 1e-9);
+  assert.equal(sleepPose(0, false).markAlpha, 0);
+});
+
+test('呼吸相位在周期改变时连续 —— 刚躺下那一帧不许「咯」一下', () => {
+  // 直接用 sin(t/period) 的实现，在换周期的那一帧相位会跳。这里量的就是那个跳变。
+  const ph = new BreathPhase();
+  let prev = breatheAt(ph.value, awakeBreath.amplitude).scaleY;
+  let worst = 0;
+  for (let i = 0; i < 1200; i++) {
+    // 第 100 帧开始一路插值到睡着，模拟弹簧。
+    const amount = Math.min(1, Math.max(0, (i - 100) / 40));
+    const sp = sleepPose(amount);
+    const cur = breatheAt(ph.step(16, sp.breathPeriodMs), sp.breathAmplitude).scaleY;
+    worst = Math.max(worst, Math.abs(cur - prev));
+    prev = cur;
+  }
+  // 一帧（16ms）内 scaleY 的变化上限约 2π·16/3400·0.012 ≈ 3.5e-4，留一个量级的余量。
+  assert.ok(worst < 2e-3, `单帧跳变 ${worst}，相位不连续`);
+});
+
+test('呼吸相位推进速率正确，且周期为 0 / 负数不会把相位算飞', () => {
+  const ph = new BreathPhase();
+  // 走满一个周期应当回到原点（允许取模误差）。
+  for (let i = 0; i < 100; i++) ph.step(34, 3400);
+  assert.ok(Math.min(ph.value, Math.PI * 2 - ph.value) < 1e-9, `一个周期后相位是 ${ph.value}`);
+  const bad = new BreathPhase();
+  bad.step(16, 0);
+  bad.step(16, -5);
+  assert.ok(Number.isFinite(bad.value), '周期为 0 把相位算成了 Infinity');
+  // breathe(t) 必须和「相位累加」等价，否则两条路会给出不同的呼吸。
+  const direct = breathe(1700);
+  const viaPhase = breatheAt((1700 / awakeBreath.periodMs) * Math.PI * 2);
+  assert.ok(Math.abs(direct.scaleY - viaPhase.scaleY) < 1e-12);
+});
+
+// ---- zzz 的节拍 ----
+
+test('zzz 节拍器：停着的时候一个都不生成', () => {
+  const e = new ZzzEmitter(sleepFeel, () => 0.5);
+  let total = 0;
+  for (let i = 0; i < 2000; i++) total += e.update(16);
+  assert.equal(total, 0, '没在睡觉却冒 zzz 了');
+});
+
+test('zzz 节拍器：睡着后按 2~3 秒的节奏周期性生成，不是只冒一个', () => {
+  const e = new ZzzEmitter(sleepFeel, mulberry(11));
+  e.setActive(true);
+  const at: number[] = [];
+  let now = 0;
+  while (now < 30000) {
+    now += 16;
+    if (e.update(16) > 0) at.push(now);
+  }
+  // 30 s 里按 2.5 s 一个应当是 11~12 个（首个延迟 0.7 s）。
+  assert.ok(at.length >= 10 && at.length <= 13, `30 s 里只冒了 ${at.length} 个 zzz`);
+  assert.ok(
+    at[0] >= sleepFeel.zzzFirstDelayMs && at[0] <= sleepFeel.zzzFirstDelayMs + 32,
+    `第一个 zzz 在 ${at[0]}ms，和约定的首延迟 ${sleepFeel.zzzFirstDelayMs}ms 不符`,
+  );
+  const gaps: number[] = [];
+  for (let i = 1; i < at.length; i++) gaps.push(at[i] - at[i - 1]);
+  for (const g of gaps) {
+    assert.ok(
+      g >= sleepFeel.zzzIntervalMs - sleepFeel.zzzJitterMs - 32 &&
+        g <= sleepFeel.zzzIntervalMs + sleepFeel.zzzJitterMs + 32,
+      `间隔 ${g}ms 跑出了约定区间`,
+    );
+    // 用户的原话是「每 2~3 秒一个」。
+    assert.ok(g >= 1800 && g <= 3200, `间隔 ${g}ms 不在 2~3 秒这个量级`);
+  }
+  // 必须真的有抖动，否则就是个节拍器，几轮之后会被看出是循环。
+  assert.ok(new Set(gaps.map((g) => Math.round(g / 100))).size >= 3, '间隔完全不抖动');
+  // 间隔必须大于 FX 的生命周期，否则 zzz 叠成一团云而不是一个个飘。
+  assert.ok(sleepFeel.zzzIntervalMs - sleepFeel.zzzJitterMs > 1400);
+});
+
+test('zzz 节拍器：停止睡觉后立刻不再生成（已经飘着的不由它管）', () => {
+  const e = new ZzzEmitter(sleepFeel, mulberry(3));
+  e.setActive(true);
+  let spawned = 0;
+  for (let i = 0; i < 400; i++) spawned += e.update(16); // 6.4 s
+  assert.ok(spawned >= 2, '准备阶段就没冒出 zzz，后面的断言没意义');
+  e.setActive(false);
+  let after = 0;
+  for (let i = 0; i < 5000; i++) after += e.update(16); // 80 s
+  assert.equal(after, 0, '叫醒之后还在冒 zzz');
+  assert.equal(e.active, false);
+  assert.equal(e.remaining, 0);
+});
+
+test('zzz 节拍器：重复 setActive(true) 不重置节拍（菜单和自动打盹可能都喊一次）', () => {
+  const e = new ZzzEmitter(sleepFeel, () => 0.5);
+  e.setActive(true);
+  for (let i = 0; i < 20; i++) e.update(16); // 320ms
+  const left = e.remaining;
+  e.setActive(true);
+  assert.equal(e.remaining, left, '重复进入睡觉把 zzz 的节拍推后了');
+});
+
+test('zzz 节拍器：一次超长帧只冒一个，不会补出一串', () => {
+  const e = new ZzzEmitter(sleepFeel, () => 0.5);
+  e.setActive(true);
+  // 切回标签页：攒了 5 分钟。
+  assert.equal(e.update(300000), 1, '超长帧应当只补一个 zzz');
+  assert.equal(e.update(16), 0, '超长帧之后紧跟着又冒了一个 —— 节拍被补课了');
+});
+
+// ---- zzz 的位置 ----
+
+test('zzz 冒在**这个姿势**的头顶上方，而不是站立那个写死的位置', () => {
+  const sleepRegions = realRegions.regionsFor('sleep');
+  const head = sleepRegions.find((r) => r.part === 'head');
+  assert.ok(head, 'sleep 姿势没量到头部框，这条测试的前提不成立');
+  const p = zzzSpawn(sleepRegions);
+  // 位置的坐标系：x 从画布中心算，y 从脚底往上算，单位都是画布高度的比例。
+  // 换回「从上往下」的归一化坐标好和命中区对比。
+  const half = sleepFeel.zzzSize / 2;
+  const bottom = 1 - (p.y - half);
+  const top = 1 - (p.y + half);
+  assert.ok(bottom <= head.y0 + 1e-9, `zzz 的下边 ${bottom} 压在头部框里（头顶 ${head.y0}）`);
+  assert.ok(top >= 0, `zzz 的上边 ${top} 飘出画布了`);
+  const headCx = (head.x0 + head.x1) / 2;
+  assert.ok(Math.abs(p.x + 0.5 - headCx) < 1e-9, 'zzz 没对准头部框的横向中心');
+  // 侧躺时头在画幅左侧 → zzz 必须跟过去。站立那份常量是 x=+0.24（角色右上方）。
+  assert.ok(p.x < -0.1, `侧躺时 zzz 还在 x=${p.x}，没跟着头挪到左边`);
+});
+
+test('站立姿势的 zzz 也留在画布内（y 被夹住，不会只剩半个）', () => {
+  for (const a of actions) {
+    const p = zzzSpawn(realRegions.regionsFor(a));
+    const half = sleepFeel.zzzSize / 2;
+    assert.ok(p.y + half <= 1 + 1e-9, `${a}: zzz 顶出画布了（y=${p.y}）`);
+    assert.ok(p.y - half > 0, `${a}: zzz 掉到脚底下了（y=${p.y}）`);
+    assert.ok(Math.abs(p.x) < 0.5, `${a}: zzz 跑出画布左右边界了（x=${p.x}）`);
+  }
+});
+
+test('没有头部框时退回整身框顶边，命中区整份缺失时也不炸', () => {
+  const body: PoseRegion = { part: 'body', x0: 0.2, y0: 0.1, x1: 0.8, y1: 0.95 };
+  const p = zzzSpawn([body]);
+  assert.ok(Math.abs(p.x + 0.5 - 0.5) < 1e-9, '退回整身框时应当对准它的横向中心');
+  assert.ok(p.y > 0);
+  // 空数组（理论上不可能，清单校验保证有 body）也要有东西兜住，不能返回 NaN。
+  const empty = zzzSpawn([]);
+  assert.ok(Number.isFinite(empty.x) && Number.isFinite(empty.y));
+});
+
+// ---------------------------------------------------------------------------
 // 命中区兜底
 // ---------------------------------------------------------------------------
 
@@ -578,6 +804,342 @@ test('一次超长帧（切回标签页）只补一次回位，不会攒出一�
 // 原来这里还有一条「摆角上限不会把脚甩出窗口」的几何预算断言，守的是 clawFeel.swingMax。
 // 参数和表现一起删了，所以断言也删了。现在角色的旋转只有 tilt（0.22 rad）和聆听侧倾
 // （0.13 rad），两者支点都在脚底 —— 绕脚底转不会把脚甩出窗口，没有需要守的预算。
+
+// ---------------------------------------------------------------------------
+// 渲染器本身：睡觉状态的持续性、zzz 的生成、命中区跟着姿势切
+//
+// 上面那些测的是数学；这一组测的是**接线**，而接线恰恰是「睡觉」最容易漏气的地方：
+// 临时动作到点回位会不会把睡姿顶掉、表情倒计时会不会把 sleepy 抹掉、
+// setSleeping 有没有真的触发 onPoseRegions（侧躺时命中区不切 = 点不中她，
+// 这是用户报过的 bug）。这些都不是纯函数，只有驱动真的 RigRenderer 才测得到。
+//
+// 怎么在没有 GUI 的环境里驱动它：见 headless() 的说明。
+// **仍然没有被验证的是手感** —— 这里没有一个像素被真的画出来。
+// ---------------------------------------------------------------------------
+
+/**
+ * 渲染器的私有状态。只有 headless() 这个夹具用，用来跳过 Pixi 的 Application.init()。
+ *
+ * 为什么可以这样：RigRenderer 里需要 GPU 的只有 `app.init()` 和 `app.renderer.resize()`，
+ * 其余（Container / Sprite / Texture 的建立与变换、所有状态机）在 Node 里都能跑。
+ * 所以这里注入「init() 成功之后」的那份最小状态，然后调它真正的公开 API。
+ * 代价是这份字段名列表和 RigRenderer 的私有字段耦合 —— 重命名会让这里编译失败，
+ * 这比「测一个和产线无关的替身」要好。
+ */
+interface RigInternals {
+  ready: boolean;
+  rig: LoadedRig | null;
+  manifest: RigManifest | null;
+  textures: Map<string, Texture>;
+  hostW: number;
+  hostH: number;
+  action: ActionName;
+  expression: string;
+  fx: { sprite: { x: number; y: number; width: number; height: number } }[];
+  sleepMark: { visible: boolean; alpha: number; x: number; y: number };
+  zzz: ZzzEmitter;
+  readonly restingAction: ActionName;
+  playAction(action: ActionName): void;
+  buildScene(): void;
+  applyExpression(expression: string, instant: boolean): void;
+  emitPoseRegions(): void;
+}
+
+interface Harness {
+  rig: RigRenderer;
+  inner: RigInternals;
+  /** onPoseRegions 的全部回调记录，顺序即发生顺序。 */
+  emitted: { pose: ActionName; regions: PoseRegion[] }[];
+  /** 推进 n 帧（每帧 dtMs）。 */
+  run(ms: number, dtMs?: number): void;
+  /** 从开始到现在一共生成过多少枚 FX（按 sprite 身份去重，淡出销毁的也算过）。 */
+  spawnCount(): number;
+  /** 当前还活着的 FX。 */
+  live(): RigInternals['fx'];
+}
+
+function headless(
+  opts: { reduceMotion?: boolean; seed?: number; beforeReady?: (rig: RigRenderer) => void } = {},
+): Harness {
+  const emitted: Harness['emitted'] = [];
+  const host = { clientWidth: 220, clientHeight: 220, appendChild() {} } as unknown as HTMLElement;
+  const rig = new RigRenderer({
+    host,
+    manifestUrl: 'rig/rig.json',
+    size: 220,
+    reduceMotion: opts.reduceMotion,
+    onPoseRegions: (regions, pose) => emitted.push({ pose, regions }),
+    onError: (m) => assert.fail(`渲染器报错：${m}`),
+  });
+  const inner = rig as unknown as RigInternals;
+  // zzz 的间隔是带随机抖动的（故意的，见 sleepFeel.zzzJitterMs）。测试里换成固定种子 ——
+  // 否则「30 s 里冒了几个」这类断言会以百分之几的概率抖出边界，变成间歇性失败。
+  inner.zzz = new ZzzEmitter(sleepFeel, mulberry(opts.seed ?? 5));
+  // 清单还没到位时就调公开 API，模拟「素材加载完成前就被要求睡觉」。
+  opts.beforeReady?.(rig);
+
+  // 清单里引用到的每个文件都给一张同尺寸的空贴图。内容无关 —— 这里不画像素，
+  // 只验证位置/显隐/生命周期，而那些只依赖贴图的尺寸。
+  const textures = new Map<string, Texture>();
+  const put = (file: string, width: number, height: number) => {
+    if (!textures.has(file)) {
+      textures.set(file, new Texture({ source: new TextureSource({ width, height, resolution: 1 }) }));
+    }
+  };
+  put(realManifest.base.file, realManifest.base.width, realManifest.base.height);
+  for (const slot of [
+    realManifest.layers.eyes,
+    realManifest.layers.brow,
+    realManifest.layers.mouth,
+  ]) {
+    for (const o of Object.values(slot)) put(o.file, o.width, o.height);
+  }
+  if (realManifest.layers.blush) {
+    const b = realManifest.layers.blush;
+    put(b.file, b.width, b.height);
+  }
+  for (const e of Object.values(realManifest.expressions)) {
+    if (e.mode === 'sprite') put(e.sprite.file, e.sprite.width, e.sprite.height);
+  }
+  for (const a of Object.values(realManifest.actions)) put(a.file, a.width, a.height);
+  for (const f of Object.values(realManifest.fx)) put(f.file, f.width, f.height);
+  put(realLogo.manifest.asset.file, realLogo.manifest.asset.width, realLogo.manifest.asset.height);
+
+  inner.manifest = realManifest;
+  inner.rig = {
+    manifest: realManifest,
+    baseUrl: 'rig/',
+    logo: realLogo,
+    logoError: null,
+    regions: realRegions,
+    regionsError: null,
+  };
+  inner.textures = textures;
+  inner.hostW = 220;
+  inner.hostH = 220;
+  inner.ready = true;
+  // init() 的尾段，去掉需要 GPU 的 layout()/ticker。顺序和 init() 里一致 ——
+  // 其中 playAction(restingAction) 就是「加载完成前被要求睡觉」的补发点。
+  inner.buildScene();
+  inner.playAction(inner.restingAction);
+  inner.applyExpression(inner.expression, true);
+  inner.emitPoseRegions();
+
+  const seen = new Set<unknown>();
+  const harness: Harness = {
+    rig,
+    inner,
+    emitted,
+    run(ms, dtMs = 16) {
+      for (let t = 0; t < ms; t += dtMs) {
+        rig.update(dtMs);
+        for (const f of inner.fx) seen.add(f.sprite);
+      }
+    },
+    spawnCount: () => seen.size,
+    live: () => inner.fx,
+  };
+  return harness;
+}
+
+/** 画布高度（px）。FX 的位置都是按它算的。 */
+const canvasH = realManifest.canvas.height;
+
+test('夹具本身是活的：初始是 idle 姿势，命中区喊过一次 idle', () => {
+  const h = headless();
+  assert.equal(h.inner.action, 'idle');
+  assert.deepEqual(h.emitted.map((e) => e.pose), ['idle']);
+  assert.deepEqual(h.emitted[0].regions, realRegions.regionsFor('idle'));
+  h.run(2000);
+  assert.equal(h.inner.action, 'idle', '什么都没做却换了姿势');
+  assert.equal(h.spawnCount(), 0, '没人要求特效却冒了特效');
+});
+
+test('setSleeping(true) 把命中区切到 sleep 那套 —— 侧躺时点不中她的那个 bug', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  const last = h.emitted.at(-1)!;
+  assert.equal(last.pose, 'sleep', 'setSleeping 没有触发 onPoseRegions，命中区还停在 idle');
+  assert.deepEqual(last.regions, realRegions.regionsFor('sleep'));
+  // 这份命中区必须真的和 idle 不一样，否则「切过去了」没有意义。
+  assert.notDeepEqual(last.regions, realRegions.regionsFor('idle'));
+  // 兜底框必须在：这是「任何姿势都点得中」的最后一道防线。
+  assert.ok(last.regions.some((r) => r.part === 'body'), 'sleep 的命中区没有整身兜底框');
+  // 叫醒之后要切回去。
+  h.rig.setSleeping(false);
+  assert.equal(h.emitted.at(-1)!.pose, 'idle');
+  assert.deepEqual(h.emitted.at(-1)!.regions, realRegions.regionsFor('idle'));
+});
+
+test('睡觉状态能撑住长跑：5000 帧之后还在睡，姿势没被回位逻辑顶掉', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  h.run(5000 * 16); // 80 s
+  assert.equal(h.rig.sleeping, true);
+  assert.equal(h.inner.action, 'sleep', '跑了 80 s 之后她自己站起来了');
+  assert.equal(h.inner.expression, sleepExpression, 'sleepy 被倒计时抹掉了');
+  // 中途一次都不该再喊命中区（姿势没变过）。首帧的 idle + 进入睡觉的 sleep 共两条。
+  assert.deepEqual(h.emitted.map((e) => e.pose), ['idle', 'sleep']);
+});
+
+test('睡觉期间 zzz 周期性地冒，而不是只冒一个', () => {
+  // 多个种子都跑一遍：间隔带抖动，单个种子可能恰好落在舒服的位置。
+  for (let seed = 1; seed <= 6; seed++) {
+    const h = headless({ seed });
+    h.rig.setSleeping(true);
+    h.run(30000);
+    const n = h.spawnCount();
+    // 30 s / 2.5 s ≈ 12 个（首个延迟 0.7 s）。节拍器那组已经把间隔测死了，
+    // 这里只确认渲染器真的把每一拍都变成了一枚 FX。
+    assert.ok(n >= 10 && n <= 14, `种子 ${seed}：30 s 里生成了 ${n} 枚 zzz`);
+    // 同一时刻不该堆着一堆 zzz（间隔 > FX 生命周期）。
+    assert.ok(h.live().length <= 2, `种子 ${seed}：同时有 ${h.live().length} 枚 zzz 在飘，叠成云了`);
+  }
+});
+
+test('zzz 冒在侧躺的头顶上方（画布像素级别对一遍）', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  // 跑到第一枚 zzz 刚出生、还没飘太远的时候量它的位置。
+  h.run(sleepFeel.zzzFirstDelayMs + 32);
+  const fx = h.live();
+  assert.equal(fx.length, 1, `期望刚好有一枚 zzz，实际 ${fx.length}`);
+  const head = realRegions.regionsFor('sleep').find((r) => r.part === 'head')!;
+  const sprite = fx[0].sprite;
+  // anchor 在中心，所以 x/y 是中心点；sprite 的 height 是画布像素。
+  const bottom = sprite.y + sprite.height / 2;
+  assert.ok(bottom <= head.y0 * canvasH + 1, `zzz 的下边 ${bottom}px 压进了头部框（顶边 ${head.y0 * canvasH}px）`);
+  assert.ok(sprite.y - sprite.height / 2 >= -1, 'zzz 飘出画布上边了');
+  const headCx = ((head.x0 + head.x1) / 2) * canvasH;
+  assert.ok(Math.abs(sprite.x - headCx) < 1, `zzz 的 x=${sprite.x}px 没对准头部中心 ${headCx}px`);
+  // 站立那份常量在角色右上方；侧躺时头在左边，zzz 必须跟过去。
+  assert.ok(sprite.x < canvasH * 0.5, 'zzz 还在画布右半边，没跟着头挪过去');
+});
+
+test('叫醒之后停止生成，但已经在飘的那几枚自然淡出（不硬切）', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  // 跑到第二枚 zzz 刚出生不久：此时天上必有一枚，而且前面已经冒过两枚。
+  h.run(sleepFeel.zzzFirstDelayMs + sleepFeel.zzzIntervalMs + sleepFeel.zzzJitterMs + 64);
+  const before = h.spawnCount();
+  assert.ok(before >= 2, `准备阶段只冒了 ${before} 枚 zzz，后面的断言没意义`);
+  const flying = h.live().length;
+  assert.ok(flying >= 1, '准备阶段天上一枚 zzz 都没有，测不到「不硬切」');
+  h.rig.setSleeping(false);
+  // 叫醒的那一帧不许把天上的 zzz 抹掉。
+  assert.equal(h.live().length, flying, '停止睡觉时把正在飘的 zzz 硬切掉了');
+  h.run(32);
+  assert.equal(h.spawnCount(), before, '叫醒之后又冒了新的 zzz');
+  // 再过一个 FX 生命周期，它们应当自己走完淡出。
+  h.run(2000);
+  assert.equal(h.live().length, 0, '旧的 zzz 没有自然淡出');
+  assert.equal(h.spawnCount(), before);
+  assert.equal(h.rig.sleeping, false);
+});
+
+test('reduceMotion 下不冒飘动的 zzz，改成一枚常驻静态 zzz', () => {
+  const h = headless({ reduceMotion: true });
+  h.rig.setSleeping(true);
+  h.run(30000);
+  assert.equal(h.spawnCount(), 0, 'reduceMotion 下还在周期性生成飘动的 zzz');
+  const mark = h.inner.sleepMark;
+  assert.equal(mark.visible, true, 'reduceMotion 下连静态 zzz 都没有，用户看不出她在睡');
+  assert.ok(mark.alpha > 0.3, `静态 zzz 的透明度只有 ${mark.alpha}`);
+  // 位置和飘动的那一版一致：对准侧躺的头顶。
+  const head = realRegions.regionsFor('sleep').find((r) => r.part === 'head')!;
+  assert.ok(Math.abs(mark.x - ((head.x0 + head.x1) / 2) * canvasH) < 1);
+  assert.ok(mark.y < head.y0 * canvasH, '静态 zzz 没在头顶上方');
+  // 命中区照样要切。
+  assert.equal(h.emitted.at(-1)!.pose, 'sleep');
+  h.rig.setSleeping(false);
+  h.run(32);
+  assert.equal(h.inner.sleepMark.visible, false, '叫醒之后静态 zzz 还挂着');
+});
+
+test('睡觉时被点一下：临时动作播完是躺回去，不是站起来，命中区也跟着回 sleep', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  // 洗牌袋保证一轮内每条反应各出现一次，所以最多四次就能抽到带动作的那条。
+  let tapped: TapReaction | null = null;
+  for (let i = 0; i < 8 && !tapped?.action; i++) tapped = h.rig.reactToTap('hand');
+  assert.ok(tapped?.action, '摸手这组一条带动作的反应都没抽到，测试前提不成立');
+  assert.notEqual(tapped.action, 'sleep');
+  assert.equal(h.inner.action, tapped.action, '单击没有换姿势');
+  assert.equal(h.emitted.at(-1)!.pose, tapped.action, '单击换姿势时没有喊命中区');
+
+  // 临时动作到点。
+  h.run(tapActionHoldMs + 64);
+  assert.equal(h.inner.action, 'sleep', '睡觉期间被点一下，动作播完她站起来了');
+  assert.equal(h.emitted.at(-1)!.pose, 'sleep', '姿势躺回去了但命中区还停在上一个动作上');
+  assert.deepEqual(h.emitted.at(-1)!.regions, realRegions.regionsFor('sleep'));
+
+  // 表情倒计时到点也要回 sleepy，而不是 neutral。
+  h.run(tapExpressionHoldMs + 64);
+  assert.equal(h.inner.expression, sleepExpression, '表情倒计时把睡觉的 sleepy 抹成 neutral 了');
+  assert.equal(h.rig.sleeping, true);
+});
+
+test('没睡觉时的回位行为不变：临时动作回 idle、临时表情回 neutral', () => {
+  const h = headless();
+  let tapped: TapReaction | null = null;
+  for (let i = 0; i < 8 && !tapped?.action; i++) tapped = h.rig.reactToTap('hand');
+  assert.ok(tapped?.action);
+  h.run(tapActionHoldMs + 64);
+  assert.equal(h.inner.action, 'idle');
+  h.run(tapExpressionHoldMs + 64);
+  assert.equal(h.inner.expression, 'neutral');
+  assert.equal(h.rig.sleeping, false);
+});
+
+test('重复 setSleeping(true) 不会重新播一遍进入动作，也不会多喊命中区', () => {
+  const h = headless();
+  h.rig.setSleeping(true);
+  const after = h.emitted.length;
+  h.run(1000);
+  h.rig.setSleeping(true);
+  h.rig.setSleeping(true);
+  assert.equal(h.emitted.length, after, '重复进入睡觉把命中区又喊了一遍');
+  assert.equal(h.rig.sleeping, true);
+});
+
+test('加载完成前就被要求睡觉：素材到位后补上睡姿（自动打盹和加载是并行的）', () => {
+  // 真实时序：IdleBehavior 的计时器、右键菜单都可能早于贴图加载完成，
+  // 那时 playAction 因为 manifest 还是 null 而无效 —— init() 的尾段必须补发一次。
+  const h = headless({
+    beforeReady: (rig) => {
+      rig.setSleeping(true);
+      assert.equal(rig.sleeping, true, '清单没到位就把睡觉状态丢了');
+    },
+  });
+  assert.equal(h.inner.action, 'sleep', '加载完成后没有补上睡姿，她站着「睡」了');
+  assert.deepEqual(h.emitted.map((e) => e.pose), ['sleep'], '命中区应当直接以 sleep 喊出来');
+  assert.deepEqual(h.emitted[0].regions, realRegions.regionsFor('sleep'));
+  assert.equal(h.inner.expression, sleepExpression);
+  // 加载完之后 zzz 也要照常冒。
+  h.run(6000);
+  assert.ok(h.spawnCount() >= 2, '补上睡姿之后 zzz 没有开始冒');
+});
+
+test('一次性 FX 的大小按画布高度归一化，不随贴图原始尺寸漂', () => {
+  // 这条守的是刚修掉的一个老问题：stepFx 原来 `scale.set(p.scale)`，
+  // 把 spawnFx 里按画布高度算好的 width/height 整个覆盖掉，
+  // FX 的实际大小变成「贴图原始尺寸 × p.scale」（256 px 贴图 ≈ 画布高度的一半）。
+  // 睡觉的 zzz 要按头部框定位，位置对不对直接取决于它多大，所以这条不能再漂回去。
+  const h = headless();
+  h.rig.spawnFx('zzz');
+  let peak = 0;
+  for (let i = 0; i < 100 && h.live().length > 0; i++) {
+    h.run(16);
+    for (const f of h.live()) peak = Math.max(peak, f.sprite.height);
+  }
+  assert.ok(peak > 0, 'FX 一帧都没活过');
+  // 生命周期曲线的峰值约 1.12，所以上限是 0.22 × 1.12 ≈ 0.25 个画布高度。
+  assert.ok(
+    peak < canvasH * 0.28,
+    `FX 峰值高度 ${peak}px（画布 ${canvasH}px）—— 大小没有被归一化`,
+  );
+  assert.ok(peak > canvasH * 0.2, `FX 峰值高度只有 ${peak}px，比目标 0.22 个画布高度还小`);
+});
 
 /** 确定性 PRNG（mulberry32）。测试里不能用 Math.random —— 失败必须可复现。 */
 function mulberry(seed: number) {

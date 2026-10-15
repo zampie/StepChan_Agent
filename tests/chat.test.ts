@@ -1093,6 +1093,7 @@ function fakeDesktop(overrides: Partial<Settings> = {}): Desktop & { settings: S
     onDragDrop: noop,
     onFrontmostChanged: noop,
     onHitTest: noop,
+    onSettingsChanged: noop,
     get settings() {
       return settings;
     },

@@ -39,10 +39,13 @@ export {
 } from './visemeMap';
 export {
   BlinkScheduler,
+  BreathPhase,
   HoldTimer,
   ShuffleBag,
   Spring,
+  awakeBreath,
   breathe,
+  breatheAt,
   listenFeel,
   listenPose,
   sway,
@@ -54,6 +57,16 @@ export {
   type ListenFeel,
   type ListenPose,
 } from './motion';
+export {
+  ZzzEmitter,
+  sleepExpression,
+  sleepFeel,
+  sleepPose,
+  zzzSpawn,
+  type FxSpawnPoint,
+  type SleepFeel,
+  type SleepPose,
+} from './sleep';
 export {
   tapPools,
   tapTargets,

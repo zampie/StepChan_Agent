@@ -4,10 +4,64 @@
 // 而且每加一个状态就要重出一套图。这里全部用时间函数 + 弹簧，状态之间天然可叠加。
 import type { EyeState } from '../../../../shared/pet';
 
-/** 呼吸：竖直方向的轻微缩放。幅度刻意很小 —— 大了就像在喘。 */
-export function breathe(tMs: number, amplitude = 0.012, periodMs = 3400) {
-  const phase = (tMs / periodMs) * Math.PI * 2;
-  return { scaleY: 1 + Math.sin(phase) * amplitude, scaleX: 1 - Math.sin(phase) * amplitude * 0.45 };
+/**
+ * 醒着时的呼吸参数。
+ *
+ * 3400 ms ≈ 17.6 次/分，是成年人清醒静息的呼吸频率；幅度刻意很小 —— 大了就像在喘。
+ * 单独导出是因为睡觉要在这两个数和 sleepFeel 的那两个数之间插值（见 sleep.ts），
+ * 两边都不该各写一份。
+ */
+export const awakeBreath = { amplitude: 0.012, periodMs: 3400 } as const;
+
+/** 呼吸：竖直方向的轻微缩放。 */
+export function breathe(
+  tMs: number,
+  amplitude: number = awakeBreath.amplitude,
+  periodMs: number = awakeBreath.periodMs,
+) {
+  return breatheAt((tMs / periodMs) * Math.PI * 2, amplitude);
+}
+
+/**
+ * 给定**相位**的呼吸形变。
+ *
+ * 为什么要把相位单独拿出来：睡着时呼吸周期要变长（见 sleep.ts 的 sleepFeel），
+ * 而 sin(t / period) 在 period 改变的那一帧相位会**跳** —— 肉眼看到身体「咯」一下，
+ * 恰好发生在「刚躺下」这个最该平滑的时刻。
+ * 用累加相位（BreathPhase）喂这个函数，周期就可以逐帧连续改变而相位不跳。
+ */
+export function breatheAt(phase: number, amplitude: number = awakeBreath.amplitude) {
+  const s = Math.sin(phase);
+  return { scaleY: 1 + s * amplitude, scaleX: 1 - s * amplitude * 0.45 };
+}
+
+/**
+ * 呼吸相位累加器。periodMs 可以每帧不同，相位始终连续。
+ *
+ * 和「从 clock 换算相位」的区别只在周期变化的那一帧，但那一帧正好是醒↔睡的过渡。
+ */
+export class BreathPhase {
+  private phase = 0;
+
+  /** 当前相位，rad（0..2π）。 */
+  get value() {
+    return this.phase;
+  }
+
+  /** 推进一帧。@returns 新相位。 */
+  step(dtMs: number, periodMs: number = awakeBreath.periodMs) {
+    // 周期为 0 / 负数会把相位推成 ±Infinity 并污染后面所有帧，直接兜住。
+    const p = periodMs > 1 ? periodMs : 1;
+    const next = this.phase + (dtMs / p) * Math.PI * 2;
+    const tau = Math.PI * 2;
+    // 取模防止长时间运行后浮点精度变差（一天的毫秒数已经让 sin 的有效位掉一截）。
+    this.phase = ((next % tau) + tau) % tau;
+    return this.phase;
+  }
+
+  reset() {
+    this.phase = 0;
+  }
 }
 
 /** 摇摆：两个不同周期的正弦叠加，避免出现肉眼可辨的循环节。 */

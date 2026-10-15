@@ -32,10 +32,11 @@ import {
 } from '../../../../shared/pet';
 import {
   BlinkScheduler,
+  BreathPhase,
   HoldTimer,
   ShuffleBag,
   Spring,
-  breathe,
+  breatheAt,
   crossfadeMs,
   easeInOut,
   fxPose,
@@ -44,6 +45,15 @@ import {
   squash,
   sway,
 } from './motion';
+import {
+  ZzzEmitter,
+  sleepExpression,
+  sleepFeel,
+  sleepPose,
+  zzzSpawn,
+  type FxSpawnPoint,
+  type SleepPose,
+} from './sleep';
 import { loadRig, proceduralActions, isNoopAction, type LoadedRig } from './rigManifest';
 import { logoSlots, type LogoPlacement, type LogoSlot } from './logoManifest';
 import { fullBodyFallback, type PoseRegion } from './poseRegions';
@@ -79,8 +89,13 @@ export interface RigRendererOptions {
   onPoseRegions?: (regions: PoseRegion[], pose: ActionName) => void;
 }
 
-/** FX 相对画布的生成位置，单位是画布高度的比例（x 从中心算，y 从脚底往上算）。 */
-const FX_SPAWN: Record<FxName, { x: number; y: number }> = {
+/**
+ * FX 相对画布的生成位置，单位是画布高度的比例（x 从中心算，y 从脚底往上算）。
+ *
+ * 这一份是**按站立姿势**定的。睡觉时的 zzz 不走这里 —— 侧躺时头在画幅左侧，
+ * 位置按逐姿势实测的头部框算（见 sleep.ts 的 zzzSpawn）。
+ */
+const FX_SPAWN: Record<FxName, FxSpawnPoint> = {
   sparkle: { x: 0.26, y: 0.84 },
   sweat: { x: 0.22, y: 0.78 },
   zzz: { x: 0.24, y: 0.92 },
@@ -89,6 +104,9 @@ const FX_SPAWN: Record<FxName, { x: number; y: number }> = {
   question: { x: 0.22, y: 0.94 },
   note: { x: -0.26, y: 0.82 },
 };
+
+/** 一次性 FX 的边长，单位＝画布高度的比例。 */
+const FX_SIZE = 0.22;
 
 const FX_LIFE_MS = 1400;
 
@@ -137,6 +155,10 @@ const LISTEN_EYES: EyeState = 'wide';
 /** 按住聆听时用作标记的特效素材（现有素材，不新生成）。音符 = 声音进来了。 */
 const LISTEN_MARK: FxName = 'note';
 
+/** 睡觉用的素材：整身姿势图 + zzz 特效，都是现有的。 */
+const SLEEP_POSE: ActionName = 'sleep';
+const SLEEP_MARK: FxName = 'zzz';
+
 interface Slot {
   /** 正在淡入的层。 */
   cur: Sprite;
@@ -151,6 +173,8 @@ interface FxInstance {
   age: number;
   baseX: number;
   baseY: number;
+  /** 把贴图归一化到目标大小（FX_SIZE / zzzSize）的缩放。生命周期曲线乘在它上面。 */
+  baseScale: number;
 }
 
 /** logo 的一枚实例：贴图 + 它在**当前画幅**里的那份静态参数（换动作时整份替换）。 */
@@ -210,6 +234,23 @@ export class RigRenderer {
   private listening = false;
   /** 聆听时耳边那枚常驻标记（现有 fx 素材，不是一次性特效）。 */
   private listenMark = new Sprite();
+
+  /**
+   * 睡觉状态。**和「动作」是两件事** —— 它一直持续到被叫醒，不会自动回位。见 sleep.ts。
+   * 主动睡觉（右键菜单）和自动打盹（IdleBehavior 的 nap 意图）都走 setSleeping()。
+   */
+  private sleepOn = false;
+  /** 睡觉的进入程度 0..1。呼吸参数、摇摆抑制、静态标记透明度都乘在它上面。 */
+  private sleepSpring = new Spring(sleepFeel.stiffness, sleepFeel.damping);
+  /** 睡觉期间周期性冒 zzz 的节拍器。停止睡觉就停止生成，已飘起来的自然淡出。 */
+  private zzz = new ZzzEmitter();
+  /** reduceMotion 下那枚**常驻静态** zzz（正常模式下由周期性 FX 接管，这枚不显示）。 */
+  private sleepMark = new Sprite();
+  /**
+   * 呼吸相位累加器。不是 breathe(clock) —— 睡着时周期要变长，
+   * 直接换周期会让相位跳一下，正好跳在刚躺下那一刻。见 motion.ts 的 BreathPhase。
+   */
+  private breath = new BreathPhase();
 
   /** 单击触发的临时动作剩余时长。归零时自动回 idle。 */
   private tapAction = new HoldTimer();
@@ -342,6 +383,11 @@ export class RigRenderer {
     }
 
     this.buildScene();
+    // 素材加载是异步的，而「睡觉」可能在这之前就被要求了（自动打盹的计时器和加载并行跑，
+    // 用户也可能在角色出现前就点了菜单）。那种情况下 setSleeping 里的 playAction
+    // 因为 manifest 还是 null 而无效，所以这里补一次。不睡觉时它就是 playAction('idle')，
+    // 和当前姿势相同 → 直接返回，什么都不做。
+    this.playAction(this.restingAction);
     this.applyExpression(this.expression, true);
     // 初始姿势（idle）的命中区也要喊一次 —— 否则在第一次换动作之前，
     // 调用方手里一份命中区都没有。
@@ -364,10 +410,14 @@ export class RigRenderer {
 
   setReduceMotion(on: boolean) {
     this.reduceMotion = on;
+    // zzz 的两种形态互斥：正常模式是周期性飘起来的 FX，reduceMotion 是一枚常驻静态图标。
+    // 所以切换时要把节拍器跟着开关，否则 reduceMotion 下会同时有两种 zzz。
+    this.zzz.setActive(this.sleepOn && !on);
     if (on) {
       this.blink.reset();
       for (const s of [this.poseSpring, this.tapSpring, this.logoSpring]) s.snap(0);
       this.listenSpring.snap(this.listening ? 1 : 0);
+      this.sleepSpring.snap(this.sleepOn ? 1 : 0);
     }
   }
 
@@ -418,6 +468,14 @@ export class RigRenderer {
   }
 
   spawnFx(name: FxName) {
+    this.spawnFxAt(name, FX_SPAWN[name], FX_SIZE);
+  }
+
+  /**
+   * 在指定位置生成一枚一次性 FX。
+   * 位置抽成参数是为了睡觉的 zzz —— 它要跟着姿势走，不能用 FX_SPAWN 那份站立常量。
+   */
+  private spawnFxAt(name: FxName, spawn: FxSpawnPoint, size: number) {
     const asset = this.manifest?.fx[name];
     if (!asset) return;
     const tex = this.textures.get(asset.file);
@@ -425,14 +483,24 @@ export class RigRenderer {
     const sprite = new Sprite(tex);
     sprite.anchor.set(0.5);
     const h = this.manifest.canvas.height;
-    const spawn = FX_SPAWN[name];
-    sprite.width = h * 0.22;
-    sprite.height = h * 0.22;
+    sprite.width = h * size;
+    sprite.height = h * size;
+    const baseScale = sprite.scale.x;
     const baseX = this.manifest.canvas.width * this.manifest.anchor.x + spawn.x * h;
     const baseY = h * this.manifest.anchor.y - spawn.y * h;
     sprite.position.set(baseX, baseY);
     this.fxLayer.addChild(sprite);
-    this.fx.push({ sprite, age: 0, baseX, baseY });
+    this.fx.push({ sprite, age: 0, baseX, baseY, baseScale });
+  }
+
+  /** 睡觉期间的一枚 zzz：位置按**当前姿势**实测的头部框算（见 sleep.ts 的 zzzSpawn）。 */
+  private spawnSleepZzz() {
+    this.spawnFxAt(SLEEP_MARK, zzzSpawn(this.poseRegions()), sleepFeel.zzzSize);
+  }
+
+  /** 当前姿势的命中区。清单缺失时是整身兜底框，绝不是空数组。 */
+  private poseRegions(): PoseRegion[] {
+    return this.rig?.regions?.regionsFor(this.action) ?? [fullBodyFallback()];
   }
 
   /**
@@ -472,6 +540,53 @@ export class RigRenderer {
   setListeningHold(on: boolean) {
     this.listening = on;
     if (this.reduceMotion) this.listenSpring.snap(on ? 1 : 0);
+  }
+
+  /** 她现在是不是睡着的。供右键菜单显示勾选状态，以及诊断/测试。 */
+  get sleeping() {
+    return this.sleepOn;
+  }
+
+  /**
+   * 睡觉状态。**主动睡觉（右键菜单）和自动打盹（IdleBehavior 的 nap 意图）都走这一个方法** ——
+   * 不要为菜单单独做一套，否则两条路的表现迟早漂开。
+   *
+   * 它是「状态」不是「动作」，这件事体现在四个地方（为什么必须如此见 sleep.ts 顶部）：
+   *   - 姿势回位的目标变成 sleep 而不是 idle（restingAction）。所以睡觉期间被点一下、
+   *     临时动作播完之后，她是**躺回去**而不是站起来。
+   *   - 表情走 setExpression() 这条「模型路径」，它会取消单击的 3.5 s 倒计时，
+   *     所以 sleepy 不会被抹掉；万一之后又被点了，倒计时到点也是回 sleepy（restingExpression）。
+   *   - 闲置摇摆按 sleepPose().swayScale 抑制到 0，呼吸换成更慢更浅的一套。
+   *   - 头顶周期性冒 zzz（ZzzEmitter + zzzSpawn），不是一次性 spawn 一个。
+   *
+   * 命中区：走 playAction() 这条路，所以 onPoseRegions 回调会照常触发并切到 sleep 那套
+   * （侧躺时 idle 的矩形一个都命中不到 —— 这是用户报过的「换姿势后点不中她」那个 bug）。
+   *
+   * reduceMotion 下退化为静态：姿势与呼吸照常（呼吸本来就被 reduceMotion 整体关掉），
+   * 周期性 zzz 换成**一枚常驻静态 zzz** —— 不是完全没有，用户要能看出她在睡。
+   */
+  setSleeping(on: boolean) {
+    if (this.sleepOn === on) return;
+    this.sleepOn = on;
+    this.zzz.setActive(on && !this.reduceMotion);
+    if (this.reduceMotion) this.sleepSpring.snap(on ? 1 : 0);
+    // 这两行同时负责「进入」和「平滑退出」：退出时 restingAction/Expression 就是 idle/neutral。
+    // playAction 内部会 emitPoseRegions()，命中区因此跟着姿势一起切。
+    this.playAction(this.restingAction);
+    this.setExpression(this.restingExpression);
+  }
+
+  /**
+   * 「没有临时状态时应该是什么姿势」。
+   * 睡觉是持续状态，所以单击的临时动作播完之后要躺回去，而不是一律回 idle。
+   */
+  private get restingAction(): ActionName {
+    return this.sleepOn ? SLEEP_POSE : 'idle';
+  }
+
+  /** 同上，表情。 */
+  private get restingExpression(): Expression {
+    return this.sleepOn ? sleepExpression : 'neutral';
   }
 
   /**
@@ -519,9 +634,14 @@ export class RigRenderer {
 
     // 单击触发的临时动作/表情到点就回位。两个都用倒计时而不是 setTimeout：
     // 渲染器销毁时不用额外清理，页面隐藏（ticker 停）时也不会在后台乱跳。
-    if (this.tapAction.tick(dtMs)) this.playAction('idle');
+    // 回位目标是 restingAction/restingExpression 而不是写死的 idle/neutral ——
+    // 睡着的时候被点一下，临时动作播完必须**躺回去**，不是站起来。
+    if (this.tapAction.tick(dtMs)) this.playAction(this.restingAction);
     // setExpression 自己会 cancel 掉倒计时，所以这里不用再清一次。
-    if (this.tapExpression.tick(dtMs)) this.setExpression('neutral');
+    if (this.tapExpression.tick(dtMs)) this.setExpression(this.restingExpression);
+
+    // 睡觉期间周期性冒 zzz。一次最多一个（超长帧不补课，见 ZzzEmitter.update）。
+    if (this.zzz.update(dtMs) > 0) this.spawnSleepZzz();
 
     this.stepFades(dtMs);
     this.stepFace(dtMs);
@@ -628,23 +748,37 @@ export class RigRenderer {
     this.buildLogo();
     this.body.addChild(this.logoLayer);
 
-    // 聆听标记挂在 fxLayer 上而不是 body 里：它和 FX 同级，跟着整体（呼吸、侧倾）走，
-    // 但不参与脸部覆盖层那套显隐逻辑 —— 它在任何动作、任何表情下都要能出现。
-    // 复用现成的 fx 贴图，没有新素材。
-    const markAsset = m.fx[LISTEN_MARK];
-    const markTex = markAsset && this.textures.get(markAsset.file);
-    if (markTex) {
-      this.listenMark.texture = markTex;
-      this.listenMark.anchor.set(0.5);
-      this.listenMark.visible = false;
-      this.fxLayer.addChild(this.listenMark);
-    } else {
-      reportDiagnostic(`聆听标记素材缺失（fx.${LISTEN_MARK}），按住说话时只有侧耳与睁大眼`);
-    }
+    // 聆听标记与睡觉标记都挂在 fxLayer 上而不是 body 里：它们和 FX 同级，跟着整体
+    // （呼吸、侧倾）走，但不参与脸部覆盖层那套显隐逻辑 —— 在任何动作、任何表情下都要能出现。
+    // 两枚都复用现成的 fx 贴图，没有新素材。
+    this.buildMark(
+      LISTEN_MARK,
+      this.listenMark,
+      `聆听标记素材缺失（fx.${LISTEN_MARK}），按住说话时只有侧耳与睁大眼`,
+    );
+    this.buildMark(
+      SLEEP_MARK,
+      this.sleepMark,
+      `睡觉标记素材缺失（fx.${SLEEP_MARK}），reduceMotion 下睡觉只有姿势、看不到 zzz`,
+    );
 
     this.root.addChild(this.body, this.fxLayer);
     this.root.pivot.set(m.canvas.width * m.anchor.x, m.canvas.height * m.anchor.y);
     this.app.stage.addChild(this.root);
+  }
+
+  /** 建一枚**常驻**标记 sprite（不是一次性 FX）：聆听的音符、睡觉的 zzz 各一枚。 */
+  private buildMark(name: FxName, sprite: Sprite, missingNote: string) {
+    const asset = this.manifest!.fx[name];
+    const tex = asset && this.textures.get(asset.file);
+    if (!tex) {
+      reportDiagnostic(missingNote);
+      return;
+    }
+    sprite.texture = tex;
+    sprite.anchor.set(0.5);
+    sprite.visible = false;
+    this.fxLayer.addChild(sprite);
   }
 
   /**
@@ -708,7 +842,7 @@ export class RigRenderer {
     const cb = this.opts.onPoseRegions;
     if (!cb || this.emittedPose === this.action) return;
     this.emittedPose = this.action;
-    cb(this.rig?.regions?.regionsFor(this.action) ?? [fullBodyFallback()], this.action);
+    cb(this.poseRegions(), this.action);
   }
 
   /**
@@ -864,6 +998,9 @@ export class RigRenderer {
     const listen = this.listenSpring.step(this.listening ? 1 : 0, dt);
     const lp = listenPose(this.clock, listen, !this.reduceMotion);
     this.applyListenMark(lp);
+    // 睡觉的进入程度。同样 reduceMotion 下已被钉住。
+    const sp = sleepPose(this.sleepSpring.step(this.sleepOn ? 1 : 0, dt), !this.reduceMotion);
+    this.applySleepMark(sp);
 
     if (this.reduceMotion) {
       this.root.scale.set(scale);
@@ -876,14 +1013,18 @@ export class RigRenderer {
       return;
     }
 
-    const br = breathe(this.clock);
+    // 呼吸：睡着时更慢更浅（见 sleepFeel 的依据）。周期逐帧插值，所以用累加相位而不是时钟，
+    // 否则「刚躺下」那一帧相位会跳。
+    const br = breatheAt(this.breath.step(dt * 1000, sp.breathPeriodMs), sp.breathAmplitude);
     // 单击挤压：目标恒为 0，靠 reactToTap 打进去的初值和初速度自由衰减。
     const sq = squash(this.tapSpring.step(0, dt));
     const scaleX = scale * br.scaleX * sq.scaleX;
     const scaleY = scale * br.scaleY * sq.scaleY;
     this.root.scale.set(scaleX, scaleY);
     // 程序化姿势 + 聆听侧倾/点头 + 闲置摇摆。三者相加，不互相覆盖。
-    this.root.rotation = this.poseSpring.step(pose, dt) + lp.rotation + sway(this.clock);
+    // 摇摆按 swayScale 抑制：侧躺的人左右摇读起来像在抽搐，所以睡着时为 0。
+    this.root.rotation =
+      this.poseSpring.step(pose, dt) + lp.rotation + sway(this.clock) * sp.swayScale;
     this.placeRoot();
     this.stepLogo(this.root.rotation, dt);
   }
@@ -907,6 +1048,33 @@ export class RigRenderer {
     this.listenMark.position.set(
       m.canvas.width * m.anchor.x + listenFeel.markX * h,
       h * m.anchor.y - listenFeel.markY * h,
+    );
+  }
+
+  /**
+   * reduceMotion 下那枚常驻静态 zzz 的每帧更新。
+   *
+   * 正常模式下 sleepPose().markAlpha 恒为 0，这枚永远不显示 —— 那时 zzz 是周期性生成的 FX。
+   * reduceMotion 下反过来：节拍器是关掉的，改由这一枚**不动不闪**的图标表示「她在睡」。
+   * 完全不显示是不行的：reduceMotion 的用户也要看得出状态（和聆听那枚音符的处理一致）。
+   *
+   * 位置和飘动的 zzz 用同一个几何函数，所以两种模式下 zzz 冒在同一个地方。
+   */
+  private applySleepMark(sp: SleepPose) {
+    if (!this.sleepMark.texture || !this.manifest) return;
+    const visible = sp.markAlpha > 0.002;
+    this.sleepMark.visible = visible;
+    if (!visible) return;
+    const m = this.manifest;
+    const h = m.canvas.height;
+    const side = h * sleepFeel.zzzSize;
+    this.sleepMark.width = side;
+    this.sleepMark.height = side;
+    this.sleepMark.alpha = sp.markAlpha;
+    const spawn = zzzSpawn(this.poseRegions());
+    this.sleepMark.position.set(
+      m.canvas.width * m.anchor.x + spawn.x * h,
+      h * m.anchor.y - spawn.y * h,
     );
   }
 
@@ -958,7 +1126,13 @@ export class RigRenderer {
         continue;
       }
       inst.sprite.alpha = p.alpha;
-      inst.sprite.scale.set(p.scale * (inst.sprite.scale.x < 0 ? -1 : 1));
+      // 生命周期的缩放是**乘在**生成时那份归一化缩放上的。
+      // 原来这里是 `scale.set(p.scale)`，直接把 spawnFx 里按画布高度算出来的
+      // sprite.width/height 覆盖掉了 —— 于是 FX 的实际大小变成「贴图原始尺寸 × p.scale」
+      // （256 px 贴图在 512 px 画布上 ≈ 画布高度的一半），FX_SIZE 等于白写。
+      // 睡觉的 zzz 要按头部框定位，位置对不对直接取决于它多大，所以这里必须修。
+      const s = inst.baseScale * p.scale;
+      inst.sprite.scale.set(s);
       inst.sprite.position.set(inst.baseX, inst.baseY + (this.reduceMotion ? 0 : p.y));
       keep.push(inst);
     }

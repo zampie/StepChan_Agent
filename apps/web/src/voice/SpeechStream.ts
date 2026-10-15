@@ -22,15 +22,25 @@ export function clampSpeechRate(rate: number): number {
  * 各自 new 出来（也可能在一次会话里重建多次），而语速是**一个全局的用户设置**。
  * 放在模块级意味着集成层只要在设置变更时调一次 setSpeechRate()，
  * 之后新建的实例自动带上正确的倍率，不用把它穿过两条链路的构造函数。
+ *
+ * **但 chat 模式不该跟这个值。** chat 模式是服务端调速（/v1/audio/speech 的 speed
+ * 参数，见 brain/chat/tts.ts），拿到的 PCM 本身就是加速过的；再叠一层播放侧的
+ * WSOLA 等于把倍率乘起来（1.15 档会变成 1.32×）。chat 模式要用
+ * `new SpeechStream(events, { rate: 1 })` 显式钉住原速。
  */
 let speechRate = clampSpeechRate(defaultSettings.speechRate);
 /** 活着的实例。setSpeechRate 要立刻作用到正在说话的那一个。 */
 const live = new Set<SpeechStream>();
 
-/** 改变所有（含之后新建的）播放实例的语速。运行时随时可调。 */
+/**
+ * 改变所有**跟随全局设置**的播放实例的语速。运行时随时可调。
+ * 构造时显式传了 rate 的实例（chat 模式）不受影响 —— 见上面的注释。
+ */
 export function setSpeechRate(rate: number): number {
   speechRate = clampSpeechRate(rate);
-  for (const stream of live) stream.setRate(speechRate);
+  for (const stream of live) {
+    if (!stream.ratePinned) stream.setRate(speechRate);
+  }
   return speechRate;
 }
 
@@ -67,11 +77,17 @@ export class SpeechStream {
   private disposed = false;
   /** 播放语速。默认跟随模块级的全局值。 */
   private rate: number;
+  /**
+   * 构造时显式指定了 rate —— 这个实例不跟随全局设置变更。
+   * 给 chat 模式用（服务端已经调过速了，播放侧必须保持 1.0，否则倍率相乘）。
+   */
+  readonly ratePinned: boolean;
 
   constructor(
     private readonly events: SpeechStreamEvents = {},
     options: { rate?: number } = {},
   ) {
+    this.ratePinned = options.rate !== undefined;
     this.rate = clampSpeechRate(options.rate ?? speechRate);
     live.add(this);
   }
@@ -178,6 +194,10 @@ export class SpeechStream {
    * 可以在说话中途改 —— worklet 不清缓冲，已经合成好的那几十毫秒照原速播完，
    * 下一轮才换倍率，所以拖滑块时中间不会出现空洞或爆音。
    * 倍率回到 1 时 worklet 走旁路，一个样本都不经过伸缩处理。
+   *
+   * 注意倍率 >1 时 worklet 会按倍率缩放预缓冲（realtime 模型按实时出音，不垫就
+   * 断续），所以**改成 >1 之后下一段话的首音会晚约半秒**。细节见
+   * public/audio-playback.js 顶部「变速路径的预缓冲与弹性倍率」。
    */
   setRate(rate: number): number {
     this.rate = clampSpeechRate(rate);
