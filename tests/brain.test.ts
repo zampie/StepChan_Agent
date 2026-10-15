@@ -575,8 +575,8 @@ function makeSession(
   ws: FakeWebSocket;
   events: PetEvent[];
   executed: { name: ToolName; args: unknown }[];
-  /** 播放层探针：压音状态可读，她的出声电平可写。 */
-  speech: { ducked: boolean; level: number };
+  /** 播放层探针：压音状态可读，出声电平可写，可手动触发「环空了」。 */
+  speech: { ducked: boolean; level: number; drain: () => void; beginSpeaking: () => void };
   /** 采集层探针：不碰真麦克风，只记录开关次数，并能按需喂几帧音频。 */
   mic: {
     starts: number;
@@ -617,7 +617,25 @@ function makeSession(
   raw.speech.unduck = () => {
     ducked = false;
   };
+  // 触发一次「环空了」。真实实现每句会发几十次（见 audio-playback.js 的
+  // processDirect），所以"最后一次 drained 落在 response.done 之前还是之后"
+  // 是一个真实存在的竞态。
+  // SpeechStream 把回调存在 this.events（构造参数属性），运行时可取到。
+  const handlers = () =>
+    (
+      session as unknown as {
+        speech: { events?: { onDrained?: () => void; onStarted?: () => void } };
+      }
+    ).speech.events;
+  const drain = () => handlers()?.onDrained?.();
+  /** 她开始出声：设电平 + 触发 onStarted（真实实现由 worklet 回报）。 */
+  const beginSpeaking = () => {
+    level = 0.4;
+    handlers()?.onStarted?.();
+  };
   const speech = {
+    drain,
+    beginSpeaking,
     get ducked() {
       return ducked;
     },
@@ -1958,5 +1976,47 @@ describe('persona：两个开关如实写进 instructions', () => {
   test('默认值与契约一致：聆听开、语音打断关', () => {
     assert.equal(defaultSettings.listening, true);
     assert.equal(defaultSettings.voiceInterruptible, false);
+  });
+});
+
+
+describe('活动状态：不能卡在 speaking', () => {
+  // 必须和其他 RealtimeSession 的 describe 一样装 WebSocket 替身 ——
+  // 漏了的话会去连真 WebSocket，于是一个事件都收不到、测试以 undefined 失败。
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  // 卡在 speaking 是静默故障：用户只会看到「气泡不消失、点她不说话、说话没反应」。
+  // 原因是退出条件原本分散在 onDrained(!responseActive) 和
+  // response.done(!audioLevel) 两处，两个条件互锁 —— 都不命中就永久卡住。
+  const lastActivity = (events: PetEvent[]): string | undefined => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.type === 'activity') return e.value;
+    }
+    return undefined;
+  };
+
+  test('drained 早于 response.done 且当时仍在出声，最终仍要回到 listening', () => {
+    const { ws, events, speech } = makeSession();
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.beginSpeaking();
+    speech.drain(); // 句中的一次环空：responseActive 仍为 true，不该改状态
+    assert.equal(lastActivity(events), 'speaking', '句中环空不该提前回到 listening');
+    ws.deliver({ type: 'response.done', response: { status: 'completed' } });
+    speech.level = 0;
+    speech.drain();
+    // 断言的是「离开了 speaking」。具体落到 listening 还是 idle 取决于麦克风
+    // 开没开，而 makeSession 绕过了 start()，所以这里不该钉死那个分支。
+    assert.notEqual(lastActivity(events), 'speaking', '最终必须退出 speaking');
+  });
+
+  test('response.done 时音频已播完则立刻退出 speaking', () => {
+    const { ws, events, speech } = makeSession();
+    ws.deliver({ type: 'response.created', response: {} });
+    speech.beginSpeaking();
+    speech.level = 0;
+    ws.deliver({ type: 'response.done', response: { status: 'completed' } });
+    assert.notEqual(lastActivity(events), 'speaking');
   });
 });

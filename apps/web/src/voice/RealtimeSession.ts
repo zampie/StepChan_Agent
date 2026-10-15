@@ -127,6 +127,10 @@ export class RealtimeSession {
 
   /** 送出的麦克风帧数。只用于诊断。 */
   private micFrames = 0;
+  private firstDeltaLogged = false;
+  private suppressLogged = false;
+  private lastActivity: 'idle' | 'listening' | 'thinking' | 'speaking' = 'idle';
+  private activityWatchdog: ReturnType<typeof setInterval> | null = null;
   private userPartial = '';
   private petPartial = '';
   readonly transcript: TranscriptEntry[] = [];
@@ -134,10 +138,7 @@ export class RealtimeSession {
   constructor(private options: RealtimeSessionOptions) {
     this.speech = new SpeechStream({
       onLevel: (level) => this.options.onLevel?.(level),
-      onDrained: () => {
-        // 说完了：回 idle 或 listening，由麦克风状态决定。
-        if (!this.responseActive) this.setActivity(this.micWanted ? 'listening' : 'idle');
-      },
+      onDrained: () => this.resolveIdleActivity(),
       onStarted: () => this.setActivity('speaking'),
       onError: (message) => this.options.emit({ type: 'error', message }),
     });
@@ -181,10 +182,43 @@ export class RealtimeSession {
   }
 
   /**
+   * 该回 idle/listening 了吗？只有在「这一轮结束 **且** 音频播完」时才回。
+   *
+   * 这个判断原来分散在两处，各带一个条件：`onDrained` 里判 `!responseActive`、
+   * `response.done` 里判 `!audioLevel`。两个条件互锁，于是只要
+   * 「最后一次 drained 早于 response.done，而 response.done 时音频还没播完」
+   * 两边就都不命中，活动状态**永久卡在 speaking**。
+   * 后果不是只有气泡不消失：`speaking` 卡住会让点击被当成「她在忙」而不说话，
+   * 而且「可打断」关闭时所有 VAD 事件都被忽略。
+   *
+   * 所以合并成一个幂等函数，并配一个看门狗（见 startActivityWatchdog）——
+   * 竞态本身被消掉，而不是再加一个条件去绕。
+   */
+  private resolveIdleActivity(): void {
+    if (this.speaking) return;
+    this.setActivity(this.micWanted ? 'listening' : 'idle');
+  }
+
+  /**
+   * 看门狗：卡在 speaking 是静默故障，用户只会看到「她不理我了」。
+   * 代价是一个 500ms 的轻量定时器，比再引入一个互锁条件划算得多。
+   */
+  private startActivityWatchdog(): void {
+    if (this.activityWatchdog) return;
+    this.activityWatchdog = setInterval(() => {
+      if (this.lastActivity === 'speaking' && !this.speaking) {
+        reportDiagnostic('activity: ⚠ 看门狗发现卡在 speaking，已复位');
+        this.resolveIdleActivity();
+      }
+    }, 500);
+  }
+
+  /**
    * 建立会话。withMic=false 用于纯打字模式，以及「按住说话」模式
    * （两者都不该在启动时就申请麦克风权限）。
    */
   async start(withMic: boolean): Promise<void> {
+    this.startActivityWatchdog();
     this.started = true;
     // 按住说话模式下不持续开麦：麦克风权限留到用户第一次长按时再申请。
     const continuous = withMic && this.listening;
@@ -201,6 +235,7 @@ export class RealtimeSession {
     if (!this.started) return;
     try {
       await this.mic.start();
+      reportDiagnostic('mic: 会话已开启麦克风（持续采集）');
       this.setActivity('listening');
     } catch {
       // 错误已经通过 onError 发出去了；降级为纯打字，不抛给调用方。
@@ -327,6 +362,7 @@ export class RealtimeSession {
   }
 
   private setActivity(value: 'idle' | 'listening' | 'thinking' | 'speaking'): void {
+    this.lastActivity = value;
     this.options.emit({ type: 'activity', value });
   }
 
@@ -464,6 +500,13 @@ export class RealtimeSession {
       tools: this.options.tools,
       tool_choice: 'auto',
     };
+    // 把生效的模式报出来。「持续聆听」靠服务端 VAD 自动提交回合，
+    // 「按住说话」则 turn_detection=null、必须手动 commit —— 两者的
+    // 「说完了没反应」长得一模一样，但原因完全不同。
+    reportDiagnostic(
+      `session: listening=${this.listening} interruptible=${this.interruptible} ` +
+        `turn_detection=${session.turn_detection ? 'server_vad' : 'null(按住说话)'}`,
+    );
     this.send({ type: 'session.update', session });
   }
 
@@ -691,6 +734,7 @@ export class RealtimeSession {
         return;
 
       case 'error': {
+        reportDiagnostic(`server error: ${event.error?.message ?? '(无消息)'}`);
         const message = event.error.message ?? '语音服务返回了一个错误。';
         console.warn('[RealtimeSession] server error', event.error);
         this.options.emit({ type: 'error', message });
@@ -723,6 +767,7 @@ export class RealtimeSession {
       case 'input_audio_buffer.speech_stopped': {
         // 开口那一下被忽略了，闭口也要一起忽略，否则活动状态会被改成 thinking
         // （她明明还在说话）。
+        reportDiagnostic(`vad: 人声结束（audio_end_ms=${event.audio_end_ms ?? '?'}）`);
         if (this.vadIgnored) {
           this.vadIgnored = false;
           return;
@@ -791,7 +836,17 @@ export class RealtimeSession {
       // ---- 音频 ----
       case 'response.audio.delta': {
         // 被打断后在途的增量必须丢掉，否则刚清空的环又被填上。
-        if (this.suppressAudio) return;
+        if (this.suppressAudio) {
+          if (!this.suppressLogged) {
+            this.suppressLogged = true;
+            reportDiagnostic('turn: ⚠ 音频增量被抑制闸门丢弃（打断后的在途数据）');
+          }
+          return;
+        }
+        if (!this.firstDeltaLogged) {
+          this.firstDeltaLogged = true;
+          reportDiagnostic('turn: 收到第一段回复音频');
+        }
         this.hadAudioOutput = true;
         this.speech.enqueue(event.delta);
         return;
@@ -800,9 +855,12 @@ export class RealtimeSession {
         return;
 
       case 'response.created': {
+        reportDiagnostic('turn: 服务端开始生成回复');
+        this.firstDeltaLogged = false;
         this.responseActive = true;
         // 新的一轮开始了，之前打断留下的在途音频已经结束。
         this.suppressAudio = false;
+        this.suppressLogged = false;
         this.resetTurnState();
         return;
       }
@@ -816,9 +874,7 @@ export class RealtimeSession {
         if (status === 'failed') {
           this.options.emit({ type: 'error', message: '这一轮没说完，再说一次试试。' });
         }
-        if (!this.speech.audioLevel) {
-          this.setActivity(this.micWanted ? 'listening' : 'idle');
-        }
+        this.resolveIdleActivity();
         return;
       }
       case 'response.output_item.done':
@@ -950,6 +1006,10 @@ export class RealtimeSession {
   }
 
   async dispose(): Promise<void> {
+    if (this.activityWatchdog) {
+      clearInterval(this.activityWatchdog);
+      this.activityWatchdog = null;
+    }
     await this.stop();
     await this.speech.dispose();
   }
