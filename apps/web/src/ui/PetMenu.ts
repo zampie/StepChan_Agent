@@ -13,10 +13,15 @@ import type { Settings } from '../../../../shared/desktop';
  * 右键菜单里的语速档位。细调（0.8~1.8 连续）在设置窗里。
  * 1.15 是默认档 —— 模型原速听着有点慢。
  */
+/**
+ * 语速档位。1.00 是模型原速 —— 保留它是因为「原速」是唯一一个
+ * **完全不经过时间伸缩**的档（见 audio-playback.js 的旁路路径），
+ * 音质上没有任何处理痕迹，所以它该是一个用户能明确选回去的选项。
+ */
 export const SPEECH_RATE_PRESETS: { label: string; value: number }[] = [
-  { label: '慢一点（0.9×）', value: 0.9 },
+  { label: '原速（1.00×）', value: 1.0 },
   { label: '正常（1.15×）', value: 1.15 },
-  { label: '快一点（1.4×）', value: 1.4 },
+  { label: '快一点（1.30×）', value: 1.3 },
 ];
 
 

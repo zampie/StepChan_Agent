@@ -6,15 +6,28 @@ use tauri_plugin_store::StoreExt;
 
 const STORE: &str = "settings.json";
 
+/// 设置的默认值**兼白名单**：`settings_set` 只接受这里出现过的键。
+///
+/// ⚠️ 这份表必须和 `shared/desktop.ts` 的 `settingsSchema` 逐键一致。
+/// 它们是同一个形状的两个真相源，少加一个键的后果是**静默丢弃**：
+/// 前端写进去不报错、读回来还是默认值，表现为「开关点了没反应、菜单永远打钩」。
+/// 这个坑真的踩过（listening 等 6 个键）。`tests/settings-parity.test.ts`
+/// 现在会直接解析本函数并与 zod schema 比对，漏一个就红。
 fn defaults() -> Value {
     json!({
         "voice": "yuanqishaonv",
         "voiceEnabled": true,
+        "speechRate": 1.15,
+        "listening": true,
+        "voiceInterruptible": false,
+        "brainMode": "realtime",
+        "chatModel": "step-5-preview",
         // 隐私相关默认全关。要用户在菜单里主动打开。
         "screenAwareness": false,
         "appAwareness": false,
         "clipboardAwareness": false,
         "autonomy": false,
+        "sleepAfterMinutes": 5,
         "petScale": 1.0,
         "reduceMotion": false,
         "hotkey": "Alt+Space"

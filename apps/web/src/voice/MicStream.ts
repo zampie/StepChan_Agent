@@ -7,6 +7,7 @@
 // - 取消/迟到：每次 start 自增 epoch，异步回来的东西对不上 epoch 就丢掉。
 // - 永不把麦克风接到 destination。
 import { REALTIME_SAMPLE_RATE } from '../../../../shared/realtime';
+import { reportDiagnostic } from '../platform/diagnostics';
 
 export type MicStreamEvents = {
   /** 一帧 PCM16 的 base64。 */
@@ -150,6 +151,10 @@ export class MicStream {
     } catch (error) {
       abandon();
       if (epoch !== this.epoch) return;
+      // 同时喊到 stderr：麦克风失败只走气泡的话，提示可能被别的错误覆盖，
+      // 现场就只剩「没反应」这一个没有指向性的症状（这个坑在渲染器上踩过一次）。
+      const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      reportDiagnostic(`mic 打开失败: ${raw}`);
       this.events.onError?.(micErrorMessage(error));
       throw error;
     }

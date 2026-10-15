@@ -434,7 +434,16 @@ export function App() {
       // 永远不成立，功能对默认设置的用户直接不可达。
       // 大脑的 listening getter 才是权威：realtime 跟随设置，chat 恒为 false。
       const brain = brainRef.current;
-      const pushToTalk = settings.voiceEnabled && brain !== null && !brain.listening;
+      // 语音整个关掉时长按**不能静默无事发生** —— 用户按住、说完、松手，
+      // 界面毫无反应，看起来就是麦克风坏了（这正是实际发生过的误判）。
+      // 所以这里给一条明确提示，而不是让条件判断悄悄吞掉这次长按。
+      if (!settings.voiceEnabled) {
+        gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer: 0 };
+        setNotice('语音现在是关着的。右键菜单里打开「语音对话」就能跟我说话啦。');
+        window.setTimeout(() => setNotice(null), 5000);
+        return;
+      }
+      const pushToTalk = brain !== null && !brain.listening;
       const timer = pushToTalk
         ? window.setTimeout(() => {
             const g = gesture.current;
