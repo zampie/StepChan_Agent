@@ -41,6 +41,22 @@ const NARRATION: Record<string, readonly string[]> = {
 const COMMON_RULE =
   '用一句话随口回应，别超过十来个字，别重复之前说过的话，也不要解释你在做什么。';
 
+/**
+ * 她「忙到不该被插话」吗？
+ *
+ * 单独抽出来并加测试，是因为这个判断已经错过一次：原来写的是
+ * `activity !== 'idle'`，而**开着持续聆听时她空闲的状态是 'listening'**，
+ * 于是 busy 永久为 true —— 点她只换表情不开口、主动感知整层静默失效。
+ * 两个都是无声失败，只能靠人肉发现。
+ *
+ * 'listening' 是她的休息态（麦克风开着在等你说话），**不算忙**。
+ */
+export function isBusyActivity(
+  value: 'idle' | 'listening' | 'thinking' | 'speaking',
+): boolean {
+  return value === 'thinking' || value === 'speaking';
+}
+
 export class TouchTalk {
   private readonly bags = new Map<string, ShuffleBag<string>>();
   /**

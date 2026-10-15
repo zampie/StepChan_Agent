@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TouchTalk, TOUCH_TALK_COOLDOWN_MS } from '../apps/web/src/brain/touchTalk';
+import {
+  TouchTalk,
+  TOUCH_TALK_COOLDOWN_MS,
+  isBusyActivity,
+} from '../apps/web/src/brain/touchTalk';
 
 // 全部用注入的时钟，没有 sleep、没有假定时器。
 
@@ -60,4 +64,21 @@ test('reset 清掉冷却（会话重建后不该残留）', () => {
   assert.ok(talk.narrate('head', false));
   talk.reset();
   assert.ok(talk.narrate('head', false), 'reset 之后应当可以立刻再开口');
+});
+
+// isBusyActivity 的语义错过一次，造成两个无声失败：点她只换表情不开口、
+// 主动感知整层失效。所以把它钉住。
+test('listening 是休息态，不算忙', () => {
+  assert.equal(isBusyActivity('listening'), false, '开着麦克风等你说话不算忙，否则点她永远不开口');
+  assert.equal(isBusyActivity('idle'), false);
+  assert.equal(isBusyActivity('thinking'), true);
+  assert.equal(isBusyActivity('speaking'), true);
+});
+
+test('持续聆听下点击必须能开口（回归：busy 曾永久为 true）', () => {
+  let now = 0;
+  const talk = new TouchTalk(() => now);
+  // 她开着麦克风在等你说话 —— 这是最常见的状态。
+  const busy = isBusyActivity('listening');
+  assert.ok(talk.narrate('head', busy), '持续聆听时点她必须会说话');
 });

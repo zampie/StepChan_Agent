@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Awareness } from './awareness';
 import { createBrain, type PetBrain } from './brain/chat';
-import { TouchTalk } from './brain/touchTalk';
+import { TouchTalk, isBusyActivity } from './brain/touchTalk';
 import { RigRenderer } from './pet';
 import { desktop } from './platform/desktop';
 import { reportDiagnostic } from './platform/diagnostics';
@@ -142,7 +142,8 @@ export function App() {
         case 'activity':
           setThinking(event.value === 'thinking');
           setSpeaking(event.value === 'speaking');
-          busyRef.current = event.value !== 'idle';
+          // 语义见 isBusyActivity 的注释（这个判断错过一次，所以有测试钉住）。
+          busyRef.current = isBusyActivity(event.value);
           if (event.value === 'idle') setUserText('');
           break;
         case 'privacy_notice':
