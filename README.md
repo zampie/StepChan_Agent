@@ -234,6 +234,14 @@ PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报
 
 ![素材拼帧动画](docs/images/stepchan.gif)
 
+### 作品海报
+
+投稿用的海报也在仓库里，由 [`tools/poster/build.sh`](tools/poster/README.md) 一条命令出：
+[动态版](docs/images/poster.gif)（5.2 秒循环）与[静态版](docs/images/poster.png)。
+版面是 HTML/CSS，角色合成直接读 `rig.json` / `logo.json` —— 和运行时渲染器同一组几何，
+连「覆盖层只在 idle 和程序化动作上成立」这条规则也照搬了。背景由 `gpt-image-2` 生成
+（源文件 `assets/poster/bg-window.png`）。
+
 > 这段是**用仓库里的素材按渲染器的几何参数逐帧重演**的，不是录屏 —— 图层偏移、
 > FX 大小与落点、歪头的 12.6° 都取自 `rig.json` 和 `RigRenderer`，所以叠法和真机一致。
 > 它比首屏那段实机录屏更系统地过了一遍表情和动作，但呼吸、随机眨眼、挤压拉伸、
@@ -289,6 +297,7 @@ apps/web/src/
   ui/                        气泡、设置窗、纯函数判断（uiState.ts）
 shared/                      冻结契约：realtime / pet / desktop / brain
 tools/art/                   素材生成流水线
+tools/poster/                海报生成（HTML + 无头 Chrome + ffmpeg）
 ```
 
 三块业务层（`brain` / `pet` / `awareness`）互相不 import，耦合只落在 `App.tsx`。

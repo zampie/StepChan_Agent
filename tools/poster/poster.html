@@ -1,0 +1,121 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Step酱 动态海报</title>
+<!--
+  用 HTML/CSS 排版而不是 PIL 画：改一行就能看效果，而且角色合成可以直接复用
+  rig.json / logo.json —— 那本来就是给前端读的清单。
+
+  三种渲染模式（?mode=）：
+    poster  完整静态海报（背景 + 文字 + 角色），用于出静态版
+    base    同上但隐藏角色，作为 GIF 的静态底
+    frame   只渲染角色（透明底），配合 ?i=N 逐帧截图
+-->
+<style>
+  :root {
+    --ink: #2a3a4e;
+    --sub: #5e7488;
+    --acc: #0b7f99;
+    --card: rgba(255, 255, 255, 0.62);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1024px; height: 1536px; overflow: hidden; }
+  body {
+    font-family: "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+  #bg { position: absolute; inset: 0; width: 1024px; height: 1536px; }
+
+  /* ---- 标题锁定组合：logo 在上、字在下 ---- */
+  #title { position: absolute; top: 38px; left: 0; width: 100%; text-align: center; }
+  #title img { width: 92px; height: 92px; filter: drop-shadow(0 3px 10px rgba(255,255,255,.9)); }
+  #title h1 {
+    font-size: 90px; font-weight: 700; color: var(--ink); letter-spacing: 2px; line-height: 1.04;
+    margin-top: 2px; text-shadow: 0 2px 18px rgba(255,255,255,.95);
+  }
+  #title p {
+    font-size: 37px; font-weight: 600; color: var(--acc); margin-top: 8px;
+    text-shadow: 0 2px 14px rgba(255,255,255,.95);
+  }
+
+  /* ---- Feature：2×2，磨砂卡保证压在背景上也看得清 ---- */
+  #feat {
+    position: absolute; top: 334px; left: 84px; width: 856px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px;
+  }
+  .f {
+    background: var(--card); backdrop-filter: blur(14px) saturate(1.1);
+    border: 1px solid rgba(255,255,255,.72); border-radius: 18px;
+    padding: 16px 20px; box-shadow: 0 6px 22px rgba(60,80,100,.10);
+  }
+  .f b { display: block; font-size: 25.5px; color: var(--ink); font-weight: 700; }
+  .f span { display: block; font-size: 19.5px; color: var(--sub); margin-top: 5px; line-height: 1.45; }
+
+  /* ---- 角色 ---- */
+  #char { position: absolute; left: 50%; transform: translateX(-50%); top: 555px; width: 665px; height: 665px; }
+  .rig-stage { position: absolute; inset: 0; transform-origin: 50% 100%; }
+  .rig-stage img { position: absolute; image-rendering: -webkit-optimize-contrast; }
+
+  /* ---- 底部：模型 + 原生 AI + 地址 ---- */
+  #foot {
+    position: absolute; bottom: 36px; left: 60px; width: 904px;
+    background: rgba(26,42,58,.80); backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,.18); border-radius: 22px;
+    padding: 20px 28px 22px; color: #e8f2f7; text-align: center;
+  }
+  #foot .cap { font-size: 18px; color: #86b6cc; letter-spacing: .5px; }
+  #foot .models { font-size: 19px; margin-top: 7px; line-height: 1.6; color: #cfe4ee; }
+  #foot .models b { color: #fff; font-weight: 700; }
+  #foot hr { border: 0; border-top: 1px solid rgba(255,255,255,.16); margin: 14px 0 12px; }
+  #foot .ai { font-size: 19px; color: #cfe4ee; }
+  #foot .ai b { color: #8fd4e8; font-weight: 700; }
+  #foot .url { font-size: 29px; font-weight: 700; margin-top: 13px; letter-spacing: .4px; }
+
+  /* 逐帧截图：画幅收成角色框，背景透明（Chrome 需配
+     --default-background-color=00000000），之后用 ffmpeg 叠到静态底上 */
+  html:has(body.mode-frame), body.mode-frame { width: 665px; height: 665px; background: transparent; }
+  body.mode-frame #bg, body.mode-frame #title, body.mode-frame #feat, body.mode-frame #foot { display: none; }
+  body.mode-frame #char { top: 0; left: 0; transform: none; }
+  body.mode-base #char { display: none; }
+</style>
+
+<img id="bg" src="../../assets/poster/bg-window.png">
+
+<div id="title">
+  <img src="../../assets/stepchan_q_v1/rig/logo.png" alt="">
+  <h1>Step酱</h1>
+  <p>你桌面上的阶跃娘</p>
+</div>
+
+<div id="feat">
+  <div class="f"><b>开口就能聊</b><span>全双工实时语音，不用按住、没有唤醒词<br>说完到首帧音频 235&nbsp;ms</span></div>
+  <div class="f"><b>摸她、拖文件、看屏幕</b><span>头顶 / 脸颊 / 徽章反应各不相同</span></div>
+  <div class="f"><b>11 种表情 · 10 个动作</b><span>呼吸、眨眼、口型都是算出来的</span></div>
+  <div class="f"><b>常驻菜单栏</b><span>单个 .app，没有服务端</span></div>
+</div>
+
+<div id="char"></div>
+
+<div id="foot">
+  <div class="cap">由阶跃星辰的模型驱动</div>
+  <div class="models">
+    <b>stepaudio-3-realtime-preview</b> · stepaudio-3-asr-max · stepaudio-3-tts<br>
+    <b>step-5-preview</b> · step-3.7-flash · step-1o-turbo-vision
+  </div>
+  <hr>
+  <div class="ai"><b>这个项目本身也是 AI 做出来的</b> —— 纯 AI coding 工作流 · 多 agent 协作开发 · 角色素材 AI 生成 · 语音全链路交给大模型</div>
+  <div class="url">github.com/zampie/StepChan_Agent</div>
+</div>
+
+<script type="module">
+  import { loadRig, renderFrame } from './rig.js';
+  import { buildTimeline } from './timeline.js';
+  const q = new URLSearchParams(location.search);
+  const mode = q.get('mode') || 'poster';
+  document.body.className = `mode-${mode}`;
+  const ctx = await loadRig('../../assets/stepchan_q_v1');
+  const tl = buildTimeline();
+  const i = Number(q.get('i') || 0);
+  renderFrame(ctx, document.getElementById('char'), mode === 'frame' ? tl[i] : { expr: 'happy' });
+  document.title = `ready:${tl.length}`;
+</script>

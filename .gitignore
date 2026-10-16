@@ -10,6 +10,7 @@ apps/web/public/rig/
 apps/web/public/assets/stepchan_q_v1/
 artifacts/
 *.log
+.DS_Store
 
 # Rust 构建产物。Tauri 的 target/ 有数万个文件、几百 MB，绝不能进版本库。
 apps/desktop/src-tauri/target/
