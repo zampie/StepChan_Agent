@@ -306,6 +306,16 @@ node scripts/realtime-probe.mjs   # 会用真实 API 额度：鉴权、VAD、工
 
 ## 许可
 
-仓库里还没有 LICENSE。角色设计源自 `assets/blue_pet_assets_v0_2/` 的原始立绘，
-Q 版重绘由 `tools/art/` 的流水线生成 —— 这部分的授权状况请以原始素材的来源为准，
-在补 LICENSE 之前不要默认可以随意再分发。
+**代码和美术素材适用不同条款**，因为它们的权利人不同：
+
+| | 条款 |
+|---|---|
+| 源代码 | [Apache License 2.0](LICENSE) —— 可自由使用、修改、再分发，含商用 |
+| 「阶跃娘 / Step酱」角色素材 | 著作权归阶跃星辰（StepFun）。**已许可随本项目一同分发与使用**；用到其他产品上需另行取得许可 |
+| 阶跃星辰 logo 与相关名称 | 商标，**不随开源许可授予** —— Apache-2.0 第 6 条明确排除 |
+
+完整说明见 [ASSETS-LICENSE.md](ASSETS-LICENSE.md) 与 [NOTICE](NOTICE)。
+
+想拿这套工程实现接自己的角色，换掉 `assets/` 下的素材目录和 `scripts/sync-rig.mjs`
+的指向就行，产物里不会残留任何阶跃星辰的素材与商标 —— 具体步骤在
+[ASSETS-LICENSE.md](ASSETS-LICENSE.md#四如果你只想要代码)。

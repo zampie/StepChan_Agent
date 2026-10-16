@@ -1,6 +1,8 @@
 [package]
 name = "stepchan-desktop"
 version = "2.0.0"
+license = "Apache-2.0"
+authors = ["zampie <liuzepeng@stepfun.com>"]
 description = "Step酱 桌面宠物"
 edition = "2021"
 rust-version = "1.90"

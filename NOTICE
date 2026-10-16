@@ -1,0 +1,43 @@
+Step酱 · 桌面宠物
+Copyright 2026 zampie <liuzepeng@stepfun.com>
+
+本产品包含由不同主体拥有、且适用不同条款的内容。
+
+---
+
+一、源代码
+
+本仓库的源代码按 Apache License 2.0 授权，全文见 LICENSE。
+
+二、角色素材与商标
+
+以下内容的**著作权归阶跃星辰（StepFun）所有，不在上述 Apache License 2.0 的
+授权范围内**：
+
+  · 「阶跃娘 / Step酱」角色设计及其全部衍生素材
+      assets/blue_pet_assets_v0_2/      原始立绘（公司提供）
+      assets/stepchan_q_v1/             Q 版重绘与分层素材
+      apps/web/public/rig/              运行期副本（构建时生成）
+  · 阶跃星辰 logo（那枚 Z 字标）
+      assets/stepchan_q_v1/_logo_stepfun.svg
+      assets/stepchan_q_v1/rig/logo.png
+      以及它在角色发饰、胸前和应用图标上的全部呈现
+
+阶跃星辰已许可上述素材随本项目一同分发与使用。超出「使用本项目」范围的用途
+（例如把该角色或 logo 用于其他产品、服务、周边或商业宣传），需另行取得
+阶跃星辰的许可。
+
+详细说明见 ASSETS-LICENSE.md。
+
+三、商标
+
+Apache License 2.0 第 6 条明确不授予商标许可。「阶跃星辰」「StepFun」「阶跃娘」
+「Step酱」及相关标识均为阶跃星辰的商标，本仓库的开源授权不构成对这些商标的任何许可。
+
+四、第三方
+
+Q 版素材由 gpt-image-2 生成（见 assets/stepchan_q_v1/rig.json 的 source.model），
+但其底层角色为上述阶跃星辰的角色设计，不因由模型生成而改变归属。
+
+运行期依赖（Tauri、React、PixiJS、Rust crates 等）各自适用其自身许可，
+见 package.json / Cargo.toml 及各依赖的授权文件。
