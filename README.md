@@ -11,17 +11,18 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/stepchan.gif" alt="Step酱动画演示" width="300">
+  <img src="docs/images/demo.gif" alt="Step酱实机演示" width="300">
+</p>
+
+<p align="center">
+  <b><a href="docs/videos/demo.mp4">▶ 完整演示（36 秒，有声音）</a></b><br>
+  <sub>上面是实机录屏的一段：被戳的反应、表情与效果件、她开口说话。<br>
+  完整版里还有语音对话的来回和自动打瞌睡 —— GIF 没有声音，而她的声音是重点，建议看视频。</sub>
 </p>
 
 <p align="center">
   <sub>Tauri 2 + React 19 + PixiJS 8 + Rust。没有服务端进程，产物就是一个 <code>.app</code>。</sub>
 </p>
-
-> 上面这段动画是**用仓库里的素材按渲染器的几何参数逐帧重演**的，不是录屏 ——
-> 桌宠窗是透明置顶的，真机录屏会把当时的桌面内容一起拍进来。
-> 图层偏移、FX 大小与落点、歪头的 12.6° 都取自 `rig.json` 和 `RigRenderer`，
-> 所以叠法和真机一致；但呼吸、随机眨眼、挤压拉伸、口型这些**程序化**动画只能在真机上看到。
 
 **当前状态与验证证据见 [PROGRESS.md](PROGRESS.md)** —— 里面写清了哪些真跑过、哪些还没验。
 
@@ -228,6 +229,15 @@ PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报
 ### 7 个一次性效果件
 
 ![效果件](docs/images/fx.png)
+
+### 动起来是什么样
+
+![素材拼帧动画](docs/images/stepchan.gif)
+
+> 这段是**用仓库里的素材按渲染器的几何参数逐帧重演**的，不是录屏 —— 图层偏移、
+> FX 大小与落点、歪头的 12.6° 都取自 `rig.json` 和 `RigRenderer`，所以叠法和真机一致。
+> 它比首屏那段实机录屏更系统地过了一遍表情和动作，但呼吸、随机眨眼、挤压拉伸、
+> 口型这些**程序化**动画只能在真机上看到（首屏那段录屏里有）。
 
 流水线在 `tools/art/`，prompt 的唯一来源是 `character.py`：
 
