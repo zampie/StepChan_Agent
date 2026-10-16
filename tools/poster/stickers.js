@@ -25,17 +25,32 @@ export const STICKERS = {
   },
   happy: {
     label: '开心',
-    // 眼型是 smile（闭着的笑眼）→ **不叠眨眼**，见文件头的说明。
-    // 改成欢快地上下晃：呼吸 + 两次小幅起伏，眼睛和嘴全程保持笑。
-    frames: (n = 16) => Array.from({ length: n }, (_, t) => {
-      const bob = Math.sin((t / n) * 4 * Math.PI);        // 两个周期，首尾都在 0
-      return {
-        expr: 'happy',
-        dy: -7 * Math.max(0, bob),                        // 只往上弹，不往下沉
-        squash: BREATH(t, n, 0.018) - 0.012 * Math.max(0, -bob),
-        rotate: SWAY(t, n, 2),
-      };
-    }),
+    // **正常眨眼需要睁开的眼。** happy 预设的眼型是 smile（闭着的笑眼），
+    // 所以这里用图层直接组合「睁眼 + 笑嘴」—— 这不是 rig.json 的 11 个预设之一，
+    // 但图层系统本身支持任意组合（见 rig.js 的 layers 参数）。
+    //
+    // 眨眼节奏照抄渲染器的 BLINK_FRAMES：half 45ms → closed 75ms → half 55ms。
+    // 12fps 下一帧 83ms，所以 half/closed/half 各一帧最接近真机观感。
+    // 中段再给一个「笑弯眼」的拍子（切到 smile 眼型），比纯眨眼更像在笑。
+    frames: () => {
+      const EYES = [
+        'open','open','open','open','open',
+        'half','closed','half',                 // 眨一次
+        'open','open',
+        'smile','smile','smile','smile',        // 笑弯了
+        'half','open','open','open',
+      ];
+      const n = EYES.length;
+      return EYES.map((eyes, t) => {
+        const bob = Math.sin((t / n) * 4 * Math.PI);
+        return {
+          layers: { eyes, brow: 'neutral', mouth: 'smile' },
+          dy: -6 * Math.max(0, bob),
+          squash: BREATH(t, n, 0.016),
+          rotate: SWAY(t, n, 1.8),
+        };
+      });
+    },
   },
   shy: {
     label: '害羞',
@@ -62,30 +77,62 @@ export const STICKERS = {
   },
   surprised: {
     label: '惊讶',
-    // 猛地往上一跳再落回（挤压拉伸：起跳拉长、落地压扁）
+    // 眼型从 open 猛切到 wide（瞪大），配合起跳 —— 比只是跳一下清楚得多。
+    // 第一帧刻意是平静的（open + 闭嘴），这样"被吓到"有个起点。
     frames: () => {
-      const seq = [0, -26, -44, -52, -44, -26, -8, 0, 0, 0, 0, 0];
-      return seq.map((dy, t) => ({
-        expr: 'surprised', fx: t < 7 ? 'exclaim' : null, dy,
+      const DY = [0, -26, -44, -52, -44, -26, -8, 0, 0, 0, 0, 0];
+      const EYE = ['open', 'wide', 'wide', 'wide', 'wide', 'wide',
+                   'wide', 'wide', 'open', 'open', 'open', 'open'];
+      return DY.map((dy, t) => ({
+        layers: { eyes: EYE[t], brow: 'raised', mouth: t === 0 ? 'closed' : 'round' },
+        fx: t >= 1 && t < 8 ? 'exclaim' : null,
+        dy,
         squash: t === 0 ? 0.94 : t === 7 ? 0.93 : dy < -20 ? 1.03 : 1,
       }));
     },
   },
   curious: {
     label: '好奇',
-    // 歪头 12.6°（渲染器 PROCEDURAL_POSE.tilt 的真值）来回
-    frames: (n = 16) => Array.from({ length: n }, (_, t) => ({
-      expr: 'curious', fx: 'question', rotate: SWAY(t, n, 12.6), squash: BREATH(t, n),
-    })),
+    // 眼型是 open → **可以正常眨眼**（不在 NO_BLINK 里）。
+    // 歪头 12.6° 是渲染器 PROCEDURAL_POSE.tilt 的真值。
+    frames: () => {
+      const EYES = [
+        'open','open','open','open','open',
+        'half','closed','half',                 // 歪到一半时眨一下
+        'open','open','open','open','open','open','open','open',
+      ];
+      const n = EYES.length;
+      return EYES.map((eyes, t) => ({
+        layers: { eyes, brow: 'raised', mouth: 'small' },
+        fx: 'question',
+        rotate: SWAY(t, n, 12.6),
+        squash: BREATH(t, n),
+      }));
+    },
   },
   excited: {
     label: '兴奋',
-    // 连续小跳 + 闪光
-    frames: (n = 14) => Array.from({ length: n }, (_, t) => {
-      const ph = (t % 7) / 7;
-      const up = Math.sin(ph * Math.PI);
-      return { expr: 'excited', fx: 'sparkle', dy: -22 * up, squash: 1 - 0.05 * (1 - up) };
-    }),
+    // **眼睛一亮**：普通大眼 → 睁大 → 星星眼 → 收回。比眨眼更贴"兴奋"。
+    // 嘴和眉全程保持（wide / raised），只有眼型在变 —— 眼型是这套素材里
+    // 表现力最强的一层。闪光在星星眼出现的那一刻冒出来。
+    frames: () => {
+      const EYES = [
+        'open','open','wide',
+        'sparkle','sparkle','sparkle','sparkle','sparkle','sparkle',
+        'wide','open','open',
+      ];
+      const n = EYES.length;
+      return EYES.map((eyes, t) => {
+        const up = Math.sin((t / n) * 2 * Math.PI);   // 一次小跳，首尾归零
+        return {
+          layers: { eyes, brow: 'raised', mouth: 'wide' },
+          fx: eyes === 'sparkle' ? 'sparkle' : null,
+          dy: -20 * Math.max(0, up),
+          squash: 1 - 0.045 * Math.max(0, -up),
+          rotate: SWAY(t, n, 2),
+        };
+      });
+    },
   },
   sleepy: {
     label: '打瞌睡',
@@ -96,9 +143,22 @@ export const STICKERS = {
   },
   proud: {
     label: '得意',
-    frames: (n = 16) => Array.from({ length: n }, (_, t) => ({
-      expr: 'proud', fx: 'note', rotate: SWAY(t, n, 3.5), squash: BREATH(t, n),
-    })),
+    // smile 在 NO_BLINK 里（本来就是闭着的笑眼），不能眨 —— 但可以做
+    // **眼型过渡**：先睁眼看着你，再得意地眯起来。比纯摆动有表情。
+    frames: () => {
+      const EYES = [
+        'open','open','open','open',
+        'half','smile','smile','smile','smile','smile','smile',
+        'half','open','open','open','open',
+      ];
+      const n = EYES.length;
+      return EYES.map((eyes, t) => ({
+        layers: { eyes, brow: 'raised', mouth: 'smile' },
+        fx: 'note',
+        rotate: SWAY(t, n, 3.5),
+        squash: BREATH(t, n),
+      }));
+    },
   },
 };
 

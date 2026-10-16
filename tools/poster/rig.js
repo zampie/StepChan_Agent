@@ -24,7 +24,14 @@ export async function loadRig(base) {
 
 /** 把一帧角色渲染进 host（host 必须是 position:relative、尺寸 = size×size）。 */
 export function renderFrame({ rig, logo, base }, host, state) {
-  const { expr = 'neutral', action = 'idle', fx = null, rotate = 0, squash = 1, dy = 0 } = state;
+  const {
+    expr = 'neutral', action = 'idle', fx = null,
+    rotate = 0, squash = 1, dy = 0,
+    // 直接指定图层组合（{eyes, brow, mouth, blush}），绕过 rig.json 的预设。
+    // 预设只有 11 个固定组合，而图层系统本身支持任意组合 —— 表情包需要
+    // 「睁眼 + 笑嘴」这种预设里没有的搭配才能做出正常的眨眼。
+    layers = null,
+  } = state;
   const S = rig.canvas.width; // 512
   host.innerHTML = '';
   const stage = document.createElement('div');
@@ -48,13 +55,14 @@ export function renderFrame({ rig, logo, base }, host, state) {
   const act = rig.actions[action];
   add(act.file, 0, 0, S, S);
 
-  if (LAYERS_ACTIVE.has(action) && expr) {
-    const e = rig.expressions[expr];
-    if (e.mode === 'sprite') {
+  if (LAYERS_ACTIVE.has(action) && (layers || expr)) {
+    const e = layers ?? rig.expressions[expr];
+    if (!layers && e.mode === 'sprite') {
       add(e.sprite.file, 0, 0, S, S);
     } else {
       for (const grp of ['eyes', 'brow', 'mouth']) {
-        const m = rig.layers[grp][e[grp]];
+        const name = e[grp] ?? (grp === 'eyes' ? 'open' : grp === 'brow' ? 'neutral' : 'closed');
+        const m = rig.layers[grp][name];
         if (m.width > 1) add(m.file, m.x, m.y, m.width, m.height);
       }
       if (e.blush) add('rig/blush.png', 0, 0, S, S);

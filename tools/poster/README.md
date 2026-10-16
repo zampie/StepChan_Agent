@@ -50,6 +50,30 @@ APNG=1 tools/poster/build-stickers.sh   # 另出真 alpha 的 APNG（体积约 4
 
 背景是 `gpt-image-2` 生成的，源文件在 `assets/poster/bg-window.png`。
 
+## 哪些表情包能动眼睛
+
+**眼睛是这套素材里表现力最强的一层，但只有分层表情能动。** 逐个核对过：
+
+| 表情包 | 用的是 | 眼睛动效 |
+|---|---|---|
+| happy | 自定义图层（睁眼 + 笑嘴） | 眨眼 → 笑弯眼 |
+| excited | 自定义图层 | 大眼 → 睁大 → 星星眼（眼睛一亮） |
+| surprised | 分层 `surprised` | 平静 → 猛地瞪大 |
+| curious | 分层 `curious`（眼型 `open`） | 歪头中途眨一次 |
+| proud | 分层 `proud`（眼型 `smile`） | 睁眼 → 得意地眯起（smile 不能眨，见下） |
+| hello / sleepy | 整身姿势图 `wave` / `sleep` | **不能** —— 姿势图自带脸，覆盖层不成立 |
+| shy / angry / sad | 整脸图（sprite） | **不能** —— 分层画不出腮红 / 怒气符号 / 眼泪，这是 `rig.json` 里记着的降级项 |
+
+两条约束来自渲染器，照搬即可：
+
+- **`NO_BLINK = {closed, half, smile}`** —— 这些眼型本身就是闭着或变形的，再叠眨眼
+  只会打架。`happy` / `proud` 的预设眼型是 `smile`，所以它们做的是**眼型过渡**而不是眨眼
+- **眨眼节奏 `half 45ms → closed 75ms → half 55ms`**（`BLINK_FRAMES`）。12fps 下一帧
+  83ms，所以 half / closed / half 各一帧最接近真机观感 —— 这也是表情包默认 12fps 的原因
+
+预设只有 11 个固定组合，而图层系统支持任意组合（见 `rig.js` 的 `layers` 参数）。
+`happy` 要正常眨眼就必须有"睁眼 + 笑嘴"这种预设里没有的搭配。
+
 ## 表情包的几个决定
 
 - **按整段的 alpha 包围盒统一裁切**，不逐帧各裁 —— 逐帧裁会让循环时画面跳动

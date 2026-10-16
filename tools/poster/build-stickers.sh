@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 PORT=${PORT:-8732}
 SIZE=${SIZE:-256}
-FPS=${FPS:-10}
+FPS=${FPS:-12}   # 12fps：渲染器的眨眼是 half45/closed75/half55，10fps 下一帧 100ms 太粗
 CHROME=${CHROME:-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}
 OUT="$ROOT/docs/images/stickers"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"; kill %1 2>/dev/null || true' EXIT
