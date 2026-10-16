@@ -24,13 +24,15 @@ export async function loadRig(base) {
 
 /** 把一帧角色渲染进 host（host 必须是 position:relative、尺寸 = size×size）。 */
 export function renderFrame({ rig, logo, base }, host, state) {
-  const { expr = 'neutral', action = 'idle', fx = null, rotate = 0, squash = 1 } = state;
+  const { expr = 'neutral', action = 'idle', fx = null, rotate = 0, squash = 1, dy = 0 } = state;
   const S = rig.canvas.width; // 512
   host.innerHTML = '';
   const stage = document.createElement('div');
   stage.className = 'rig-stage';
-  // 呼吸/落地回弹就是沿 y 压扁，锚点在脚底 —— 和渲染器同一种做法
-  stage.style.transform = `rotate(${rotate}deg) scaleY(${squash})`;
+  // 呼吸/落地回弹就是沿 y 压扁，锚点在脚底 —— 和渲染器同一种做法。
+  // dy 是整体上下位移（rig 单位，负值向上），表情包的弹跳用它。
+  stage.style.transform =
+    `translateY(${(dy / S) * 100}%) rotate(${rotate}deg) scaleY(${squash})`;
   host.appendChild(stage);
 
   const add = (file, x, y, w, h, extra = '') => {

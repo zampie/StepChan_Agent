@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/hero.png" alt="Step酱" width="300">
+  <img src="docs/images/stickers/hello.gif" alt="Step酱" width="260">
 </p>
 
 <h1 align="center">Step酱 · 桌面宠物</h1>
@@ -232,9 +232,24 @@ PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报
 
 ![效果件](docs/images/fx.png)
 
-### 动起来是什么样
+### 动态表情包
 
-![素材拼帧动画](docs/images/stepchan.gif)
+透明背景，10 个循环，在 `docs/images/stickers/` 下：
+
+| | | | | |
+|:-:|:-:|:-:|:-:|:-:|
+| ![](docs/images/stickers/hello.gif) | ![](docs/images/stickers/happy.gif) | ![](docs/images/stickers/shy.gif) | ![](docs/images/stickers/angry.gif) | ![](docs/images/stickers/sad.gif) |
+| 打招呼 | 开心 | 害羞 | 生气 | 难过 |
+| ![](docs/images/stickers/surprised.gif) | ![](docs/images/stickers/curious.gif) | ![](docs/images/stickers/excited.gif) | ![](docs/images/stickers/sleepy.gif) | ![](docs/images/stickers/proud.gif) |
+| 惊讶 | 好奇 | 兴奋 | 打瞌睡 | 得意 |
+
+能动的东西只有四类：表情覆盖层、整身姿势图、一次性效果件，外加程序化变换
+（旋转 / 沿 y 压扁 / 上下位移）。所有「动作」都是这四类的组合 —— 挥手是姿势图加
+小幅摆动，惊讶是起跳时拉长、落地时压扁，好奇是按渲染器的真值歪 12.6°。
+**没有逐帧绘制的素材。**
+
+GIF 只有 1 bit 透明，但这个画风下看不出毛刺（角色本身带浅色描边），深底浅底都干净。
+需要真 alpha 时 `APNG=1 tools/poster/build-stickers.sh`，代价是体积约 4 倍。
 
 ### 作品海报
 
@@ -243,11 +258,6 @@ PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报
 版面是 HTML/CSS，角色合成直接读 `rig.json` / `logo.json` —— 和运行时渲染器同一组几何，
 连「覆盖层只在 idle 和程序化动作上成立」这条规则也照搬了。背景由 `gpt-image-2` 生成
 （源文件 `assets/poster/bg-window.png`）。
-
-> 这段是**用仓库里的素材按渲染器的几何参数逐帧重演**的，不是录屏 —— 图层偏移、
-> FX 大小与落点、歪头的 12.6° 都取自 `rig.json` 和 `RigRenderer`，所以叠法和真机一致。
-> 它比首屏那段实机录屏更系统地过了一遍表情和动作，但呼吸、随机眨眼、挤压拉伸、
-> 口型这些**程序化**动画只能在真机上看到（首屏那段录屏里有）。
 
 流水线在 `tools/art/`，prompt 的唯一来源是 `character.py`：
 
@@ -272,11 +282,13 @@ PCM 采样率是 **24000**，文档没写。确定方法是测服务端自己报
 视觉 QA 拼版：`assets/stepchan_q_v1/_qa_220.png`（全身，浅底 / 深底 / 棋盘格）
 与 `_qa_faces.png`（脸部特写）。
 
-上面这三张表和顶部的动画由 `tools/art/readme-images.py` 按 `rig.json` 的真实几何合成
-（图层偏移、FX 边长 = 画布高 × 0.22、FX 落点、歪头 12.6°，全部照抄 `RigRenderer` 的常量），
-改了素材重跑 `python3 tools/art/readme-images.py` 就能更新。
-它连「覆盖层只在 `idle` 和程序化动作上成立」这条规则也照搬了 —— 不照搬的话睡觉姿势会被叠上
-表情层，眼睛飘到头顶去，而那正是应用里真实发生过的一个 bug。
+README 里的表情表、动作表、效果件表、表情包和海报**都由同一套 web 管线出**
+（见 [`tools/poster/`](tools/poster/README.md)），几何参数一律照抄 `RigRenderer`：
+图层偏移、FX 边长 = 画布高 × 0.22、FX 落点、歪头 12.6°，以及 logo 的逐姿势坐标。
+
+> 早先这些图是另一个 Python 脚本出的，**它没有做 logo 覆盖** —— README 里显示的
+> 徽章一直是生图模型自己画的方块，不是阶跃的标志。合并成一套管线就是为了消掉
+> 这种「同一个事实两处实现」。
 
 ## 代码地图
 
