@@ -24,8 +24,14 @@ python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
 sleep 2
 URL="http://127.0.0.1:$PORT/tools/poster/poster.html"
 
-NAMES=$(node --input-type=module -e \
-  "import('$ROOT/tools/poster/stickers.js').then(m=>process.stdout.write(m.STICKER_NAMES.join(' ')))")
+# 不带参数出全部；带名字只出指定的几个（改一个表情不用等全套重跑）
+#   ./build-stickers.sh happy
+if [ $# -gt 0 ]; then
+  NAMES="$*"
+else
+  NAMES=$(node --input-type=module -e \
+    "import('$ROOT/tools/poster/stickers.js').then(m=>process.stdout.write(m.STICKER_NAMES.join(' ')))")
+fi
 
 for name in $NAMES; do
   N=$(node --input-type=module -e \

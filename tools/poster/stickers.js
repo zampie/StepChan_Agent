@@ -5,6 +5,12 @@
 // 没有逐帧绘制的素材，也不需要。
 //
 // 每条循环都要**首尾相接**，否则贴图循环时会跳一下。
+//
+// ⚠️ **眨眼只能叠在睁眼的表情上。** 渲染器里有明文规则
+// （`RigRenderer` 的 `NO_BLINK = {closed, half, smile}`）：这些眼型本身就是闭着或
+// 变形的，再叠眨眼只会打架。`happy` / `proud` 的眼型是 `smile`（闭着的笑眼），
+// 第一版在 happy 里插了眨眼（smile→half→half→smile），结果"半睁的眼"在笑眼之间
+// 来回，读作「无语 → 微笑」。眼型见 rig.json 的 expressions。
 const BREATH = (t, n, amp = 0.014) => 1 - amp * (1 - Math.cos((t / n) * 2 * Math.PI)) / 2;
 /** 沿正弦来回摆，首尾都在 0。 */
 const SWAY = (t, n, amp) => amp * Math.sin((t / n) * 2 * Math.PI);
@@ -19,10 +25,17 @@ export const STICKERS = {
   },
   happy: {
     label: '开心',
-    frames: (n = 14) => Array.from({ length: n }, (_, t) => ({
-      expr: t === 5 ? 'confused' : t === 6 || t === 7 ? 'sleepy' : 'happy',  // 中间眨一次
-      squash: BREATH(t, n),
-    })),
+    // 眼型是 smile（闭着的笑眼）→ **不叠眨眼**，见文件头的说明。
+    // 改成欢快地上下晃：呼吸 + 两次小幅起伏，眼睛和嘴全程保持笑。
+    frames: (n = 16) => Array.from({ length: n }, (_, t) => {
+      const bob = Math.sin((t / n) * 4 * Math.PI);        // 两个周期，首尾都在 0
+      return {
+        expr: 'happy',
+        dy: -7 * Math.max(0, bob),                        // 只往上弹，不往下沉
+        squash: BREATH(t, n, 0.018) - 0.012 * Math.max(0, -bob),
+        rotate: SWAY(t, n, 2),
+      };
+    }),
   },
   shy: {
     label: '害羞',

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/stickers/hello.gif" alt="Step酱" width="260">
+  <img src="docs/images/stickers/happy.gif" alt="Step酱" width="260">
 </p>
 
 <h1 align="center">Step酱 · 桌面宠物</h1>
