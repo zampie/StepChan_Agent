@@ -27,6 +27,7 @@
 **当前状态与验证证据见 [PROGRESS.md](PROGRESS.md)** —— 里面写清了哪些真跑过、哪些还没验。
 **制作过程、agent 协作流程与踩坑记录见 [docs/MAKING_OF.md](docs/MAKING_OF.md)** ——
 3.5 天、33 个提交怎么走下来的，以及哪些判断事后证明是错的。
+美术侧的生图与动图实践笔记见 [docs/ART_PIPELINE_NOTES.md](docs/ART_PIPELINE_NOTES.md)。
 
 ---
 
