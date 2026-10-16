@@ -93,10 +93,17 @@
 
 ### C2. ad-hoc 签名、未公证
 
-- **现状**：`signingIdentity: "-"`，`spctl -a` 返回 `rejected`，首次打开要右键 →
-  打开，或 `xattr -dr com.apple.quarantine`。
-- **方向**：Apple 开发者证书 + notarize。属于「要不要以正式产品分发」的决定，
-  不是纯技术问题。
+- **现状**：`signingIdentity: "-"`，`spctl -a` 返回 `rejected`。从浏览器下载安装后
+  首次打开必定被拦，提示「Apple 无法验证…是否包含恶意软件」。
+- **证据**（实测，macOS 26.6.2）：安装后 `xattr -l` 上确实挂着
+  `com.apple.quarantine: ...;Edge;...`；**「右键 → 打开」这条绕过路径在 macOS 15
+  及以上已经被 Apple 去掉了** —— README 原来就是这么写的，实际不管用，已更正为
+  「系统设置 → 隐私与安全性 → 仍要打开」或 `xattr -dr com.apple.quarantine`。
+- **方向**：Apple 开发者证书 + notarize（`APPLE_ID` / `APPLE_PASSWORD` /
+  `APPLE_TEAM_ID` 或 API key 三件套，tauri 构建时会自动公证）。属于「要不要以
+  正式产品分发」的决定，不是纯技术问题 —— 需要付费开发者账号。
+- **注意**：只要还是 ad-hoc 签名，每次重新构建的二进制身份都会变，TCC 授权也会
+  跟着失效（见 C3）。这两条是同一个根因的两个症状。
 
 ### C3. TCC 授权绑定代码签名，重新编译即失效
 

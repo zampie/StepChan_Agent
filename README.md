@@ -34,9 +34,23 @@
 **仅 Apple Silicon（arm64）。** 产物是 `aarch64` 单架构，Intel Mac 跑不了 —— 需要的话得
 自己加 `x86_64-apple-darwin` 目标重新构建（`tauri build --target universal-apple-darwin`）。
 
-**首次打开会被 Gatekeeper 拦住**，因为这个包是 ad-hoc 签名（`signingIdentity: "-"`），
-没有 Apple 开发者证书、也没做公证。右键点图标 → **打开** → 再确认一次就行；
-或者 `xattr -dr com.apple.quarantine "/Applications/Step酱.app"`。
+**首次打开一定会被 Gatekeeper 拦住**，提示「Apple 无法验证"Step酱"是否包含可能危害
+Mac 安全或泄漏隐私的恶意软件」。原因是这个包是 ad-hoc 签名（`signingIdentity: "-"`），
+没有 Apple 开发者证书、也没做公证 —— 不是它真的有问题，而是 Apple 无从验证。
+
+两种放行方式，**按你的系统版本选**：
+
+- **macOS 15 及以上**（含 26）：先双击一次让它被拦下，然后
+  **系统设置 → 隐私与安全性 → 往下滚** → 会看到「已阻止"Step酱"…」→ 点**仍要打开**。
+  ⚠️ 这些版本**已经没有「右键 → 打开」这条路了**，Apple 把它去掉了。
+- **任意版本**（最快）：终端跑
+  `xattr -dr com.apple.quarantine "/Applications/Step酱.app"`
+  —— 这是把下载来源的「隔离」标记删掉。只对你自己信任来源的包这么做。
+
+旧版 macOS（14 及以下）还可以用「右键点图标 → 打开 → 再确认一次」。
+
+要彻底免掉这一步只能走 Apple 开发者证书 + 公证，见
+[docs/TODO.md](docs/TODO.md) 的 C2。
 
 然后需要一个[阶跃星辰](https://platform.stepfun.com/)的 API key。两种给法：
 
