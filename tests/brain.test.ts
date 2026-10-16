@@ -2150,24 +2150,125 @@ describe('回归：「关了开关还是被打断」的三个独立根因', () =
     assert.equal(harness.speech.flushes, flushesBefore, '欠载那一瞬不该变成可打断');
   });
 
-  test('D3 她说话期间掐断音频上行，服务端才没法自己开回合', () => {
-    const harness = makeSession({ interruptible: false });
+  // D3 的修法换过一次，这里记下原因 —— 否则后人会把它「优化」回去。
+  //
+  // 第一版是反应式的：收到 speech_started 之后停止上传 + 发 input_audio_buffer.clear，
+  // 推断「没有音频就没有回合」。**真机日志否掉了它**：
+  //   vad: 服务端检测到人声开始
+  //   vad: 不可打断 —— 已暂停音频上行并清空服务端缓冲   ← 确实执行了
+  //   asr: 转写完成「」                                 ← 音频真的被清掉了
+  //   turn: 服务端开始生成回复                           ← 服务端照样开了新回合
+  // 服务端在发出 speech_started 的那一刻就已经开了回合，事后清 buffer 救不回来。
+  //
+  // 所以现在是预防式的：她一开口（response.created）就把 turn_detection 热改成
+  // null，她说完再恢复。VAD 关着期间服务端不检测人声、不 commit、不开回合。
+
+  /** 最后一次 session.update 里的 turn_detection。 */
+  const lastVad = (harness: ReturnType<typeof makeSession>) => {
+    const updates = harness.ws.framesOf('session.update');
+    const last = updates.at(-1);
+    if (!last) return undefined;
+    return (last.session as { turn_detection?: unknown }).turn_detection;
+  };
+
+  test('D3 她一开口就关掉服务端 VAD（预防式，不等它报人声）', () => {
+    const harness = makeSession({ interruptible: false, listening: true });
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+
+    assert.equal(
+      lastVad(harness),
+      null,
+      '她开口时就必须把 turn_detection 改成 null —— 等 speech_started 再做已经来不及',
+    );
+  });
+
+  test('D3 VAD 关掉的同时也停止上传音频（否则恢复 VAD 时攒下的音频会被当成一句话）', () => {
+    const harness = makeSession({ interruptible: false, listening: true });
     harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
     harness.speech.beginSpeaking();
     harness.ws.sent.length = 0;
 
-    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
-    assert.ok(
-      harness.ws.sentTypes().includes('input_audio_buffer.clear'),
-      '必须清掉服务端已经堆起来的音频，否则那一段就够它开一个回合',
-    );
-
-    harness.ws.sent.length = 0;
     harness.mic.feed(5);
+    assert.equal(harness.ws.framesOf('input_audio_buffer.append').length, 0, '不该再上传');
+  });
+
+  test('D3 她说完后恢复 VAD，并且先清缓冲再开（顺序反了会提交一句不存在的话）', () => {
+    const harness = makeSession({ interruptible: false, listening: true });
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'response.done', response: { id: 'r1', status: 'completed' } });
+    harness.speech.drain();
+
+    assert.deepEqual(
+      lastVad(harness),
+      {
+        type: 'server_vad',
+        prefix_padding_ms: 300,
+        silence_duration_ms: 700,
+        energy_awakeness_threshold: 2200,
+      },
+      '她说完必须把 VAD 原样恢复，否则她再也听不见',
+    );
+    const types = harness.ws.sentTypes();
+    assert.ok(
+      types.indexOf('input_audio_buffer.clear') < types.lastIndexOf('session.update'),
+      '必须先清缓冲再开 VAD',
+    );
+  });
+
+  test('D3 可打断模式下既不碰 VAD、也不掐麦克风（回归：打断曾因此失效）', () => {
+    // 真实发生过的回归：VAD 挂起和掐断上行被拆成两次调用，只给前者加了
+    // 「可打断就跳过」的闸门 —— 于是开着打断开关时她一开口就停传音频，
+    // 服务端压根听不到用户说话，打断整个失效。日志里是这样：
+    //   session: listening=true interruptible=true turn_detection=server_vad
+    //   vad: 不可打断 —— 已暂停音频上行并清空服务端缓冲   ← 不该执行
+    //   asr: 转写完成「给我讲个笑话呗」                   ← 转写到了却打不断
+    const harness = makeSession({ interruptible: true, listening: true });
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+
+    assert.equal(
+      harness.ws.framesOf('session.update').length,
+      0,
+      '开着打断开关时不该为了她说话去改 VAD',
+    );
+    harness.ws.sent.length = 0;
+    harness.mic.feed(4);
     assert.equal(
       harness.ws.framesOf('input_audio_buffer.append').length,
-      0,
-      '她说话期间不能再往上传音频 —— 服务端 VAD 会自己 commit 并在服务端截断她',
+      4,
+      '**开着打断开关时必须继续上传音频** —— 不传服务端就听不到，打断永远不会发生',
+    );
+  });
+
+  test('D3 按住说话模式下不碰 VAD —— 它本来就是 null', () => {
+    const harness = makeSession({ interruptible: false, listening: false });
+    harness.ws.sent.length = 0;
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    assert.equal(harness.ws.framesOf('session.update').length, 0, '不该重复推一次相同配置');
+  });
+
+  test('D3 她没在说话时，用户开口不该立起音频丢弃闸门', () => {
+    // 原来 beginBargeIn 在 !speaking 时会调 interrupt()，于是每次用户开口都白开
+    // 一个 1.5 秒的丢弃闸门，真机日志里一轮对话刷了 8 条
+    // 「⚠ 丢弃闸门超时自动解除」，还顺手清掉了「嘴上答应却不调工具」的兜底。
+    const harness = makeSession({ interruptible: true });
+    const flushesBefore = harness.speech.flushes;
+    harness.ws.sent.length = 0;
+
+    harness.ws.deliver({ type: 'input_audio_buffer.speech_started', audio_start_ms: 0 });
+
+    assert.equal(harness.speech.flushes, flushesBefore, '没东西要打断就不该 flush');
+    assert.equal(
+      harness.ws.sentTypes().includes('response.cancel'),
+      false,
+      '也不该发 response.cancel',
     );
   });
 
@@ -2575,5 +2676,69 @@ describe('回归：30 分钟轮换要等她说完，但不能无限等', () => {
       done,
       new Promise((_, reject) => setTimeout(() => reject(Error('rotate 在 stop 之后还在等')), 2000)),
     ]);
+  });
+});
+
+describe('回归：服务端的空闲超时不该弹报错气泡', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  // 服务端会掐掉长时间没动作的会话，紧跟着我们自动重连，对用户没有影响。
+  // 但真机日志里一次挂机刷了 10 条 "too long without operation"，每条都变成
+  // 一个红色报错气泡 —— 桌宠放着不管，过一会儿屏幕上冒出一串「语音服务返回了
+  // 一个错误」，而其实什么都没坏。
+  test('空闲超时只记诊断，不发 error 事件', () => {
+    const { ws, events } = makeSession();
+    events.length = 0;
+    ws.deliver({ type: 'error', error: { message: 'too long without operation' } });
+    assert.equal(
+      events.filter((e) => e.type === 'error').length,
+      0,
+      '空闲超时不是用户能处理的事，不该弹报错',
+    );
+  });
+
+  test('其他服务端错误照常弹，而且带上服务端原话', () => {
+    const { ws, events } = makeSession();
+    events.length = 0;
+    ws.deliver({ type: 'error', error: { message: 'invalid_request_error: bad voice' } });
+    const err = events.find((e) => e.type === 'error');
+    assert.ok(err, '真错误必须报出来 —— 静默吞掉是这个项目反复踩的坑');
+    assert.match(
+      err.type === 'error' ? err.message : '',
+      /bad voice/,
+      '要带上服务端原话，不要换成笼统的说法',
+    );
+  });
+});
+
+describe('回归：没东西可取消时不该立起丢弃闸门', () => {
+  beforeEach(resetWebSocket);
+  afterEach(cleanupSessions);
+
+  // 闸门是为了丢掉 response.cancel 之后那几条在途音频增量。她没在出声时没有
+  // 在途增量，立闸门纯属多余，还要等 1.5 秒超时才解除 —— 真机日志里按住说话
+  // 模式下每按一次就刷一条「⚠ 丢弃闸门超时自动解除」，因为 beginPushToTalk()
+  // 会无条件先 interrupt() 一下。
+  const suppressing = (session: RealtimeSession) =>
+    (session as unknown as { suppressAudio: boolean }).suppressAudio;
+
+  test('她没在出声时 interrupt() 不立闸门', () => {
+    const { session, speech } = makeSession();
+    speech.drain(); // 确认环是空的
+    session.interrupt();
+    assert.equal(suppressing(session), false, '没有在途增量就不该丢弃后续音频');
+  });
+
+  test('她正在出声时 interrupt() 必须立闸门', () => {
+    const harness = makeSession();
+    harness.ws.deliver({ type: 'response.created', response: { id: 'r1' } });
+    harness.speech.beginSpeaking();
+    harness.session.interrupt();
+    assert.equal(
+      suppressing(harness.session),
+      true,
+      '取消之后还会到几条在途增量，不拦会在被打断后又蹦出半个字',
+    );
   });
 });

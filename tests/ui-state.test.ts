@@ -15,6 +15,7 @@ import {
   longPressPlan,
   sessionSyncFor,
   shouldListenAfterWake,
+  tapShouldReact,
 } from '../apps/web/src/ui/uiState';
 import { defaultSettings, settingsSchema, type Settings } from '../shared/desktop';
 
@@ -245,5 +246,27 @@ describe('睡眠：不聆听、不显示气泡，谁能出声要分来源', () =
       false,
       '按住说话模式不常开麦，醒来也不该开',
     );
+  });
+});
+
+describe('点击反应：叫醒的那一下不抽随机反应', () => {
+  // 真实发生过：洗牌袋里有 head.sleepy（困倦脸 + zzz），抽到它时她刚被叫醒就又
+  // 摆出困倦脸、头上继续冒 zzz，看起来和没醒一样。用户报的是「睡觉时点一下没
+  // 反应，点第二下会连续变两个表情」。headless 复现确认第一下抽到的正是
+  // {"id":"head.sleepy","expression":"sleepy","fx":"zzz"}。
+  test('把她叫醒的那一下不抽 —— 醒来本身就是反应', () => {
+    assert.equal(tapShouldReact({ wokeHer: true, isSecondOfDouble: false }), false);
+  });
+
+  test('双击的第二下不抽 —— 否则一次双击连变两个表情', () => {
+    assert.equal(tapShouldReact({ wokeHer: false, isSecondOfDouble: true }), false);
+  });
+
+  test('醒着的单击照常抽', () => {
+    assert.equal(tapShouldReact({ wokeHer: false, isSecondOfDouble: false }), true);
+  });
+
+  test('叫醒 + 恰好落在双击窗口内，仍然不抽', () => {
+    assert.equal(tapShouldReact({ wokeHer: true, isSecondOfDouble: true }), false);
   });
 });

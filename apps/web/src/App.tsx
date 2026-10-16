@@ -24,6 +24,7 @@ import {
   longPressPlan,
   sessionSyncFor,
   shouldListenAfterWake,
+  tapShouldReact,
 } from './ui/uiState';
 import { defaultSettings, type Settings } from '../../../shared/desktop';
 import type { ActionName, Expression, FxName } from '../../../shared/pet';
@@ -607,6 +608,8 @@ export function App() {
     moved: boolean;
     talking: boolean;
     timer: number;
+    /** 这一下是不是把她叫醒的那一下。见 tapShouldReact。 */
+    wokeHer: boolean;
   } | null>(null);
   /** 移动超过这么多像素就算拖动，不再算点击或长按。 */
   const DRAG_THRESHOLD = 4;
@@ -648,8 +651,8 @@ export function App() {
       // 点一下就该醒。awareness 的 wake 意图会走模型（要等回复），
       // 但视觉上必须立刻醒，否则点了还躺着像卡住。
       applySleep(false);
-      // 双击的第二下不再换表情（见 TAP_DEDUPE_MS）。
-      if (!isSecondOfDouble) {
+      // 要不要抽一个随机反应，判断在 tapShouldReact（有测试钉住）。
+      if (tapShouldReact({ wokeHer: g.wokeHer, isSecondOfDouble })) {
         // 表情是即时的（零延迟）；开口要等模型，所以带冷却且她忙时跳过。
         rigRef.current?.reactToTap(lastHitPart.current);
         const line = touchTalk.current.narrate(lastHitPart.current, busyRef.current);
@@ -658,11 +661,13 @@ export function App() {
         if (line) speak(line);
       }
     }
-  }, [speak]);
+  }, [speak, applySleep]);
 
   const beginGesture = useCallback(
     (e: React.PointerEvent) => {
       if (e.button !== 0) return;
+      // 这一下是不是把她叫醒的那一下 —— 必须在 applySleep 之前读。
+      const wokeHer = sleepingRef.current;
       // 手指一按下就先叫醒她。
       //
       // 必须在这里而不是只在 pointerup 的点击分支里：睡着时麦克风是关的，
@@ -685,7 +690,7 @@ export function App() {
       if (plan === 'voice-off') {
         // 语音整个关掉时长按**不能静默无事发生** —— 用户按住、说完、松手，
         // 界面毫无反应，看起来就是麦克风坏了（这正是实际发生过的误判）。
-        gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer: 0 };
+        gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer: 0, wokeHer };
         showNotice('语音现在是关着的。右键菜单里打开「语音对话」就能跟我说话啦。', 5000);
         return;
       }
@@ -704,7 +709,7 @@ export function App() {
               });
             }, LONG_PRESS_MS)
           : 0;
-      gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer };
+      gesture.current = { x: e.clientX, y: e.clientY, moved: false, talking: false, timer, wokeHer };
     },
     [settings.voiceEnabled, showNotice, showError, applySleep],
   );

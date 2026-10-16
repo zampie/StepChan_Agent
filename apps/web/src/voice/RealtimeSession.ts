@@ -48,6 +48,22 @@ const THINKING_TIMEOUT_MS = 10_000;
  * ROTATE_MARGIN_MS 留了 90 秒余量，这里最多吃掉 60 秒，剩 30 秒够重连 + 推摘要。
  */
 const ROTATE_WAIT_MAX_MS = 60_000;
+/**
+ * 服务端 VAD 的参数。**只有这一份**，`sendSessionUpdate` 和 VAD 的挂起/恢复都用它。
+ *
+ * silence_duration_ms：文档默认 100ms 在桌宠场景下不可用 —— 说话里任何一个自然
+ * 停顿都会被当成「说完了」，一句话被切成好几个回合。停顿容忍抬到 700ms。
+ *
+ * energy_awakeness_threshold：曾经抬到 3400 来挡环境噪声，但实测这会把**低增益的
+ * 输入整个挡掉** —— 用户的 AirPods 自检峰值只有 0.001，那种电平永远跨不过 3400，
+ * 表现是「麦克风检测通过但说话毫无反应」。现在回到接近文档默认的 2200。
+ */
+const SERVER_VAD = {
+  type: 'server_vad',
+  prefix_padding_ms: 300,
+  silence_duration_ms: 700,
+  energy_awakeness_threshold: 2200,
+} as const;
 /** 等她说完时的轮询间隔。250ms 足够细 —— 切点误差听不出来。 */
 const ROTATE_POLL_MS = 250;
 /**
@@ -175,6 +191,29 @@ export class RealtimeSession {
    * 激活策略下桌宠窗平时不抢键盘焦点，所以别把 Esc 当主要出路写给用户。
    */
   private micHeld = false;
+  /**
+   * 「不可打断」期间把服务端 VAD 整个关掉。
+   *
+   * **为什么掐断音频上行不够 —— 这是实测结论，不是推断。** 原来的做法是收到
+   * `speech_started` 之后停止上传并发 `input_audio_buffer.clear`，当时推断
+   * 「没有音频就没有回合」。真机日志否掉了它：
+   *
+   *   vad: 服务端检测到人声开始
+   *   vad: 不可打断 —— 已暂停音频上行并清空服务端缓冲   ← 确实执行了
+   *   asr: 转写完成「」                                 ← 音频真的被清掉了
+   *   turn: 服务端开始生成回复                           ← 服务端照样开了新回合
+   *
+   * 服务端在**发出 speech_started 的那一刻**就已经开了一个回合，事后清 buffer
+   * 救不回来；而新回合一开，它就把她上一轮的生成丢掉了。**反应式来不及。**
+   *
+   * 所以改成预防式：她一开始说话就 `session.update` 把 turn_detection 设成 null
+   * （已实测可在同一连接上双向热改、改完立刻生效，见 setListening 的注释），
+   * 她说完再恢复。VAD 关着期间服务端不会检测人声、不会 commit、不会开回合。
+   *
+   * 代价不变：这段时间用户说的话是**真的被丢掉**了。这正是「不可打断」的语义 ——
+   * 想插话就长按她。
+   */
+  private vadSuspended = false;
   /** 按住说话进行中。 */
   private pttActive = false;
   /** 本次长按已经送出去多少帧音频。见 MIN_PUSH_TO_TALK_FRAMES。 */
@@ -267,12 +306,52 @@ export class RealtimeSession {
    */
   private resolveIdleActivity(): void {
     if (this.speaking) return;
-    // 她说完了 → 恢复音频上行（「不可打断」期间是停掉的）。
+    // 她说完了 → 先清缓冲再开 VAD。顺序要紧：反过来的话停传期间攒下的
+    // 在途音频会在 VAD 刚恢复时被当成一句话提交。
     this.releaseMicUpload();
+    this.resumeServerVad();
     this.setActivity(this.micWanted ? 'listening' : 'idle');
   }
 
-  /** 她说话期间掐断音频上行，让服务端无话可提交。见 micHeld 的注释。 */
+  /**
+   * 她要开口了 → 不可打断模式下把**服务端 VAD 和音频上行一起**停掉。
+   *
+   * ⚠️ 两件事必须共用这一个闸门。拆成两次调用、只给其中一个加 `interruptible`
+   * 判断，后果是**开着打断开关时打断失效** —— 她一开口就掐断上行，服务端
+   * 压根听不到用户说话。这个回归真的发生过，真机日志里长这样：
+   *   session: listening=true interruptible=true turn_detection=server_vad
+   *   turn: 服务端开始生成回复
+   *   vad: 不可打断 —— 已暂停音频上行并清空服务端缓冲   ← 不该执行
+   *   asr: 转写完成「给我讲个笑话呗」                   ← 转写到了却打不断
+   *
+   * 不适用的两种情况：可打断模式（本来就该让 VAD 工作、该收音），
+   * 以及按住说话模式（turn_detection 本来就是 null，麦克风也不常开）。
+   */
+  private shieldWhileSpeaking(): void {
+    if (this.interruptible || !this.listening) return;
+    this.suspendServerVad();
+    this.holdMicUpload();
+  }
+
+  /** 关掉服务端 VAD。只该由 shieldWhileSpeaking 调用 —— 闸门在那里。 */
+  private suspendServerVad(): void {
+    if (this.vadSuspended) return;
+    this.vadSuspended = true;
+    // 走 sendSessionUpdate 推**完整**配置，不是只发一个 turn_detection 字段 ——
+    // 没有验证过服务端是合并还是整体替换，只发一个字段有把 instructions/voice/tools
+    // 一起冲掉的风险。setListening 热改 VAD 用的也是这条路。
+    this.sendSessionUpdate(false);
+    reportDiagnostic('vad: 不可打断 —— 已关掉服务端 VAD（她说完再开）');
+  }
+
+  private resumeServerVad(): void {
+    if (!this.vadSuspended) return;
+    this.vadSuspended = false;
+    this.sendSessionUpdate(false);
+    reportDiagnostic('vad: 已恢复服务端 VAD');
+  }
+
+  /** 她说话期间掐断音频上行。配合 suspendServerVad 一起用，见 micHeld 的注释。 */
   private holdMicUpload(): void {
     if (this.micHeld) return;
     this.micHeld = true;
@@ -593,29 +672,9 @@ export class RealtimeSession {
       voice: this.options.voice,
       input_audio_format: 'pcm16',
       output_audio_format: 'pcm16',
-      turn_detection: this.listening
-        ? {
-            type: 'server_vad',
-            // 文档默认值在桌宠场景下不可用：silence_duration_ms 默认 **100ms**，
-            // 说话里任何一个自然停顿都会被当成「说完了」，于是一句话被切成好几个回合。
-            // 停顿容忍抬到 700ms。
-            //
-            // energy_awakeness_threshold 曾经抬到 3400 来挡环境噪声，但实测发现
-            // 这会把**低增益的输入整个挡掉** —— 用户的 AirPods 自检峰值只有 0.001，
-            // 那种电平永远跨不过 3400，表现是「麦克风检测通过但说话毫无反应」。
-            // 现在回到接近文档默认的 2200：噪声误触发的代价已经小得多了，因为
-            // 「可打断」默认关闭（见 voiceInterruptible），噪声最多多开一个回合，
-            // 不会再把她说到一半的话砍掉。宁可偶尔多听一句，也不要听不见。
-            prefix_padding_ms: 300,
-            silence_duration_ms: 700,
-            energy_awakeness_threshold: 2200,
-          }
-        : // 按住说话：服务端 VAD 必须关掉，否则它会在用户还按着的时候
-          // 按停顿把一句话截成好几个回合。关掉之后断句完全由长按手势决定，
-          // 松手时手动 commit + response.create。
-          // 实测：null 会被接受（服务端回显 turn_detection:{"type":""}），
-          // 之后不再有 speech_started/stopped，也不会自己开回合。
-          null,
+      // 两种情况下必须关掉服务端 VAD（见 SERVER_VAD 与 vadSuspended 的注释）：
+      // 按住说话模式，以及「不可打断」期间她正在说话。
+      turn_detection: this.listening && !this.vadSuspended ? SERVER_VAD : null,
       input_audio_transcription: {
         model: 'stepaudio-3-asr-max',
         language: 'zh',
@@ -823,11 +882,15 @@ export class RealtimeSession {
   /** VAD 说有人开口：先压音量，等确认。 */
   private beginBargeIn(): void {
     if (this.pendingBargeIn) return;
-    // 她本来就没在说话，没什么要打断的，直接当新回合。
-    if (!this.speaking) {
-      this.interrupt();
-      return;
-    }
+    // 她本来就没在说话 —— **什么都不用做**。
+    //
+    // 原来这里调 interrupt()，理由是「直接当新回合」。但 interrupt() 会立起
+    // 音频丢弃闸门（suppressAudio）并发 response.cancel，而这时根本没有东西
+    // 要打断：真机日志里每次用户开口都跟着一条
+    //   turn: ⚠ 丢弃闸门超时自动解除（response.created 没来）
+    // 一轮对话刷了 8 条。闸门白开 1.5 秒，还顺手清掉了 awaitingToolFor 和
+    // 补刀定时器（「她嘴上答应却不调工具」的兜底就失效了）。
+    if (!this.speaking) return;
     this.pendingBargeIn = true;
     this.speech.duck();
     this.bargeInTimer = setTimeout(() => {
@@ -864,15 +927,25 @@ export class RealtimeSession {
     const hadAudio = this.speech.audioLevel > 0 || this.responseActive;
     this.speech.flush();
     this.speech.unduck();
-    // 先立起丢弃闸门，再发 cancel —— cancel 之后还会有在途增量（实测 4 条）。
-    this.suppressAudio = true;
-    this.armSuppressExpiry();
+    // **只有真的取消了什么，才需要丢弃闸门。**
+    //
+    // 闸门的用途是丢掉 `response.cancel` 之后那几条在途音频增量（实测 4 条）。
+    // 她本来就没在出声时没有在途增量，立闸门纯属多余 —— 而且每次都要等 1.5 秒
+    // 超时才解除，真机日志里按住说话模式下每按一次就刷一条
+    //   turn: ⚠ 丢弃闸门超时自动解除（response.created 没来）
+    // 因为 beginPushToTalk() 会无条件先 interrupt() 一下。
+    if (hadAudio) {
+      // 顺序要紧：先立闸门再发 cancel，反过来会漏掉最先到的那几条增量。
+      this.suppressAudio = true;
+      this.armSuppressExpiry();
+    }
     if (this.responseActive) this.send({ type: 'response.cancel' });
     this.responseActive = false;
     this.activeResponseId = null;
-    // 打断之后她不说话了，音频上行必须恢复（「不可打断」期间是停掉的），
-    // 否则用户接下来说的话一帧都传不上去 —— 表现为「打断成功了但她再也听不见」。
+    // 打断之后她不说话了，上行和 VAD 都必须恢复 —— 否则用户接下来说的话
+    // 一帧都传不上去，表现为「打断成功了但她再也听不见」。
     this.releaseMicUpload();
+    this.resumeServerVad();
     if (this.nudgeTimer) {
       clearTimeout(this.nudgeTimer);
       this.nudgeTimer = null;
@@ -934,6 +1007,9 @@ export class RealtimeSession {
     this.firstDeltaLogged = false;
     this.vadIgnored = false;
     this.micHeld = false;
+    // 只复位标志，不推配置：连接可能已经断了，而重连后 sendSessionUpdate
+    // 会按这个标志重新算出 server_vad。
+    this.vadSuspended = false;
     this.awaitingToolFor = null;
     if (this.nudgeTimer) {
       clearTimeout(this.nudgeTimer);
@@ -994,10 +1070,18 @@ export class RealtimeSession {
         return;
 
       case 'error': {
-        reportDiagnostic(`server error: ${event.error?.message ?? '(无消息)'}`);
-        const message = event.error.message ?? '语音服务返回了一个错误。';
+        const raw = event.error?.message ?? '';
+        reportDiagnostic(`server error: ${raw || '(无消息)'}`);
         console.warn('[RealtimeSession] server error', event.error);
-        this.options.emit({ type: 'error', message });
+        // **空闲超时不是用户能处理的错误，不往界面上弹。**
+        //
+        // 服务端会掐掉长时间没动作的会话（实测消息是 "too long without operation"），
+        // 紧跟着连接关闭、我们自动重连 —— 整个过程对用户没有影响。而真机日志里
+        // 一次挂机就刷了 10 条，每条都会变成一个红色报错气泡：桌宠放在那儿不管，
+        // 过一会儿屏幕上冒出一串「语音服务返回了一个错误」，而其实什么都没坏。
+        // 报错气泡要留给用户真能做点什么的情况。
+        if (/too long without operation/i.test(raw)) return;
+        this.options.emit({ type: 'error', message: raw || '语音服务返回了一个错误。' });
         return;
       }
 
@@ -1142,6 +1226,7 @@ export class RealtimeSession {
         // 告诉 UI「上一句可以收了」。必须在这里发而不是让 UI 自己猜：
         // 这是唯一一个「新回合开始」一定先于本轮任何字幕的时刻。
         this.options.emit({ type: 'turn_start' });
+        this.shieldWhileSpeaking();
         this.firstDeltaLogged = false;
         this.responseActive = true;
         this.activeResponseId =

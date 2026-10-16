@@ -179,3 +179,22 @@ export function intentDisposition(
 export function shouldListenAfterWake(settings: Pick<Settings, 'voiceEnabled' | 'listening'>): boolean {
   return settings.voiceEnabled && settings.listening;
 }
+
+/**
+ * 这一下点击要不要抽一个随机反应（换表情/动作/冒效果件）。
+ *
+ * 两种情况不抽：
+ *
+ * 1. **双击的第二下** —— 否则一次双击会连变两个表情。
+ * 2. **把她叫醒的那一下** —— 醒来本身就是反应（躺着→站起来是很大的视觉变化），
+ *    再叠一个随机反应只会和它打架。这不是洁癖，是真实发生过的 bug：洗牌袋里
+ *    有 `head.sleepy`（困倦脸 + zzz 效果件），抽到它的时候她刚被叫醒就又摆出
+ *    困倦脸、头上继续冒 zzz —— 看起来**和没醒一样**。用户报的是「睡觉时点一下
+ *    没反应，点第二下会连续变两个表情」：第一下其实反应了，只是那个反应恰好
+ *    把刚退出的状态又摆了一遍；第二下抽到别的，于是两段变化挤在一起。
+ *
+ * 叫醒的那一下仍然会让她开口说话（narrate 那条路不走这里），所以不会显得没反应。
+ */
+export function tapShouldReact(input: { wokeHer: boolean; isSecondOfDouble: boolean }): boolean {
+  return !input.wokeHer && !input.isSecondOfDouble;
+}
