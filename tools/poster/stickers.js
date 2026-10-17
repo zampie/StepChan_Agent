@@ -68,12 +68,26 @@ export const STICKERS = {
   },
   sad: {
     label: '难过',
-    // 慢慢往下沉一点再回来，配汗滴
-    frames: (n = 16) => Array.from({ length: n }, (_, t) => ({
-      expr: 'sad', fx: 'sweat',
-      squash: 1 - 0.03 * (1 - Math.cos((t / n) * 2 * Math.PI)) / 2,
-      dy: 5 * (1 - Math.cos((t / n) * 2 * Math.PI)) / 2,
-    })),
+    // **不叠 sweat。** 整脸图本身就画了眼泪（眼下的泪痕 + 眼里的水光）——
+    // rig.json 的 degraded 里写着「分层无法表达腮红/怒气符号/眼泪 → 使用整脸图」，
+    // 所以眼泪已经在图里了。再加一枚汗滴读起来是「汗」不是「哭」，是两回事。
+    //
+    // 整脸图自带脸 → 眼睛动不了，所以表情全靠动作：慢慢往下沉，中间两次
+    // 抽泣式的小颤（快速一提再落回）。
+    frames: () => {
+      const n = 18;
+      const SOB = new Set([6, 7, 12, 13]);   // 抽泣的两下
+      return Array.from({ length: n }, (_, t) => {
+        const droop = 6 * (1 - Math.cos((t / n) * 2 * Math.PI)) / 2;  // 首尾归零
+        const sob = SOB.has(t) ? -3 : 0;
+        return {
+          expr: 'sad',
+          dy: droop + sob,
+          squash: 1 - 0.028 * (droop / 6) + (sob ? 0.012 : 0),
+          rotate: SWAY(t, n, 2.2),
+        };
+      });
+    },
   },
   surprised: {
     label: '惊讶',
